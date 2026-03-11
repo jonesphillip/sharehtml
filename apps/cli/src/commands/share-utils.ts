@@ -4,7 +4,7 @@ import {
   listDocuments,
   setDocumentSharing,
 } from "../api/client.js";
-import { isMarkdownFile, markdownFilenameToHtml } from "../utils/markdown.js";
+import { renderedFilenameToHtml } from "../utils/document-render.js";
 
 interface ResolvedDocument {
   id: string;
@@ -15,11 +15,7 @@ interface ResolvedDocument {
 
 function getLookupFilename(reference: string): string {
   const filename = basename(reference);
-  if (isMarkdownFile(filename)) {
-    return markdownFilenameToHtml(filename);
-  }
-
-  return filename;
+  return renderedFilenameToHtml(filename);
 }
 
 export async function resolveDocumentReference(reference: string): Promise<ResolvedDocument | null> {

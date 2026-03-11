@@ -330,7 +330,7 @@ export function HomeView({
               ) : (
                 <div class="setup-block">
                   <p>
-                    Deploy HTML or Markdown files with the{" "}
+                    Deploy HTML, Markdown, or code files with the{" "}
                     <a href="https://github.com/jonesphillip/sharehtml">sharehtml CLI</a>, then:
                   </p>
                   {raw(`<pre><span class="cmd-comment"># install the CLI</span>
@@ -350,7 +350,7 @@ sharehtml deploy example/coffee-report.html</pre>`)}
             <template id="documents-setup-template">
               <div class="setup-block">
                 <p>
-                  Deploy HTML or Markdown files with the{" "}
+                  Deploy HTML, Markdown, or code files with the{" "}
                   <a href="https://github.com/jonesphillip/sharehtml">sharehtml CLI</a>, then:
                 </p>
                 {raw(`<pre><span class="cmd-comment"># install the CLI</span>

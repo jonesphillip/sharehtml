@@ -6,7 +6,7 @@ I've been using coding agents like Claude Code and OpenCode to put together data
 
 ## What is sharehtml?
 
-Deploy an HTML or Markdown file, get a link where others can view it and collaborate with comments, reactions, and live presence. Re-deploy to update the content at the same URL. Markdown files are converted to styled HTML automatically.
+Deploy an HTML, Markdown, or code file, get a link where others can view it and collaborate with comments, reactions, and live presence. Re-deploy to update the content at the same URL. Markdown and common code files are converted to styled HTML automatically.
 
 - **CLI deploys** — `sharehtml deploy report.html` → `https://sharehtml.yourteam.workers.dev/d/9brkzbe67ntm`
 - **Collaborative** — comments, threaded replies, emoji reactions, text anchoring
@@ -35,12 +35,14 @@ If you enable Cloudflare Access, you'll need a [Cloudflare API token](https://da
 - **Account > Access: Apps and Policies > Edit**
 - **Account > Access: Organization, Identity Providers, and Groups > Read**
 
-When it's done, try deploying the included example:
+When it's done, try deploying one of the included examples:
 
 ```bash
 sharehtml deploy example/coffee-report.html
 # or try the markdown example:
 sharehtml deploy example/sample.md
+# or deploy a code file:
+sharehtml deploy apps/cli/src/index.ts
 ```
 
 If a document with the same filename exists, the CLI will prompt to update it. Use `-u` to skip the prompt.
@@ -94,7 +96,7 @@ Browser ◄┘──► Durable Objects
 
 | Command | Description |
 |---------|-------------|
-| `sharehtml deploy <file>` | Deploy an HTML or Markdown file (creates or updates) |
+| `sharehtml deploy <file>` | Deploy an HTML, Markdown, or code file (creates or updates) |
 | `sharehtml list` | List your documents |
 | `sharehtml open <id>` | Open a document in the browser |
 | `sharehtml delete <id>` | Delete a document |

@@ -10,7 +10,7 @@ import {
 } from "../api/client.js";
 import { deploymentRequiresLogin } from "../auth/capabilities.js";
 import { updateDocumentSharing } from "./share-utils.js";
-import { isMarkdownFile, markdownFilenameToHtml } from "../utils/markdown.js";
+import { renderedFilenameToHtml } from "../utils/document-render.js";
 
 function confirm(question: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -23,8 +23,8 @@ function confirm(question: string): Promise<boolean> {
 }
 
 export const deployCmd = new Command("deploy")
-  .description("Deploy an HTML or Markdown file and get a shareable link")
-  .argument("<file>", "Path to HTML or Markdown file")
+  .description("Deploy an HTML, Markdown, or code file and get a shareable link")
+  .argument("<file>", "Path to HTML, Markdown, or code file")
   .option("-t, --title <title>", "Document title (defaults to filename)")
   .option("-u, --update", "Update existing document without prompting")
   .option("--share", "Make the document shareable after deploy")
@@ -55,9 +55,7 @@ export const deployCmd = new Command("deploy")
       }
 
       const filename = basename(filePath);
-      const lookupFilename = isMarkdownFile(filename)
-        ? markdownFilenameToHtml(filename)
-        : filename;
+      const lookupFilename = renderedFilenameToHtml(filename);
       const existing = await findDocumentByFilename(lookupFilename);
 
       if (existing) {

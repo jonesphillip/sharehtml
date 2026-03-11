@@ -3,10 +3,13 @@ import { basename } from "node:path";
 import { getAuthHeaders } from "../auth/access.js";
 import { getConfig, isConfigured } from "../config/store.js";
 import {
+  defaultDocumentTitleFromFilename,
+  isCodeFile,
   isMarkdownFile,
-  markdownFilenameToHtml,
+  renderCodeToHtml,
+  renderedFilenameToHtml,
   renderMarkdownToHtml,
-} from "../utils/markdown.js";
+} from "../utils/document-render.js";
 
 interface DeployResult {
   id: string;
@@ -53,10 +56,16 @@ async function prepareUpload(
   let blob: Blob;
   if (isMarkdownFile(filename)) {
     const mdText = fileBuffer.toString("utf-8");
-    const mdTitle = title || filename.replace(/\.(md|markdown)$/i, "");
+    const mdTitle = title || defaultDocumentTitleFromFilename(filename);
     const html = renderMarkdownToHtml(mdText, mdTitle, filePath);
     blob = new Blob([html], { type: "text/html" });
-    filename = markdownFilenameToHtml(filename);
+    filename = renderedFilenameToHtml(filename);
+  } else if (isCodeFile(filename)) {
+    const codeText = fileBuffer.toString("utf-8");
+    const codeTitle = title || defaultDocumentTitleFromFilename(filename);
+    const html = renderCodeToHtml(codeText, codeTitle, filename);
+    blob = new Blob([html], { type: "text/html" });
+    filename = renderedFilenameToHtml(filename);
   } else {
     blob = new Blob([fileBuffer], { type: "text/html" });
   }
