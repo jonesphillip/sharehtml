@@ -203,6 +203,8 @@
         exact?: string;
         prefix?: string;
         suffix?: string;
+        start?: number;
+        end?: number;
         value?: string;
       }[];
     };
@@ -239,18 +241,25 @@
       exact?: string;
       prefix?: string;
       suffix?: string;
+      start?: number;
+      end?: number;
       value?: string;
     }[] = [];
 
     const exactText = getExactTextFromRange(range);
     const exactStart = getTextOffsetForRange(range);
     if (exactStart >= 0) {
-      const fullText = document.body.textContent || "";
+      const fullText = collectDocumentTextIndex().text;
       selectors.push({
         type: "TextQuoteSelector",
         exact: exactText,
         prefix: fullText.slice(Math.max(0, exactStart - 32), exactStart),
         suffix: fullText.slice(exactStart + exactText.length, exactStart + exactText.length + 32),
+      });
+      selectors.push({
+        type: "TextPositionSelector",
+        start: exactStart,
+        end: exactStart + exactText.length,
       });
     }
 
@@ -703,7 +712,14 @@
   interface HighlightComment {
     id: string;
     anchor?: {
-      selectors?: { type: string; exact?: string; prefix?: string; suffix?: string }[];
+      selectors?: {
+        type: string;
+        exact?: string;
+        prefix?: string;
+        suffix?: string;
+        start?: number;
+        end?: number;
+      }[];
     } | null;
     resolved?: boolean;
     parent_id?: string | null;
@@ -715,7 +731,7 @@
       if (!comment.anchor || comment.resolved || comment.parent_id) continue;
       const textQuote = comment.anchor.selectors?.find((s) => s.type === "TextQuoteSelector");
       if (!textQuote) continue;
-      const range = findTextRange(textQuote.exact!, textQuote.prefix, textQuote.suffix);
+      const range = findAnchorRange(comment.anchor);
       if (!range) orphaned.push(comment.id);
     }
     sendToParent({ type: "highlights:orphaned", ids: orphaned });
@@ -780,10 +796,7 @@
     const anchor = comment.anchor;
     if (!anchor || !anchor.selectors) return;
 
-    const textQuote = anchor.selectors.find((s) => s.type === "TextQuoteSelector");
-    if (!textQuote) return;
-
-    const range = findTextRange(textQuote.exact!, textQuote.prefix, textQuote.suffix);
+    const range = findAnchorRange(anchor);
     if (!range) return;
 
     wrapRangeWithMarks(range, () => {
@@ -798,14 +811,11 @@
   }
 
   function getTextOffsetForRange(range: Range): number {
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let offset = 0;
-    let node: Text | null;
-    while ((node = walker.nextNode() as Text | null)) {
-      if (node === range.startContainer) {
-        return offset + range.startOffset;
+    const textIndex = collectDocumentTextIndex();
+    for (const entry of textIndex.nodes) {
+      if (entry.node === range.startContainer) {
+        return entry.start + range.startOffset;
       }
-      offset += node.textContent!.length;
     }
     return -1;
   }
@@ -817,56 +827,120 @@
     return range.cloneContents().textContent || "";
   }
 
-  function findTextRange(exact: string, prefix?: string, suffix?: string): Range | null {
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let node: Text | null;
-    let accumulated = "";
-    const nodes: { node: Text; start: number }[] = [];
+  function findAnchorRange(
+    anchor: { selectors?: { type: string; exact?: string; prefix?: string; suffix?: string; start?: number; end?: number }[] },
+  ): Range | null {
+    if (!anchor?.selectors) return null;
 
-    while ((node = walker.nextNode() as Text | null)) {
-      nodes.push({ node, start: accumulated.length });
-      accumulated += node.textContent;
+    const quote = anchor.selectors.find((selector) => selector.type === "TextQuoteSelector");
+    if (!quote?.exact) return null;
+
+    const textIndex = collectDocumentTextIndex();
+    const position = anchor.selectors.find((selector) => selector.type === "TextPositionSelector");
+    if (
+      position &&
+      typeof position.start === "number" &&
+      typeof position.end === "number" &&
+      textIndex.text.slice(position.start, position.end) === quote.exact
+    ) {
+      return createRangeFromOffsets(textIndex.nodes, position.start, position.end);
     }
 
-    // Find the exact text, preferring match with matching prefix+suffix
-    let bestIdx = -1;
-    let bestScore = -1;
+    const match = findStrictQuoteOffsets(textIndex.text, quote.exact, quote.prefix, quote.suffix);
+    if (!match) return null;
+
+    return createRangeFromOffsets(textIndex.nodes, match.start, match.end);
+  }
+
+  function collectDocumentTextIndex() {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node: Text | null;
+    let text = "";
+    const nodes: { node: Text; start: number; end: number }[] = [];
+
+    while ((node = walker.nextNode() as Text | null)) {
+      if (!isCountedTextNode(node)) continue;
+      const start = text.length;
+      text += node.textContent || "";
+      nodes.push({ node, start, end: text.length });
+    }
+
+    return { text, nodes };
+  }
+
+  function isCountedTextNode(node: Text): boolean {
+    let current: Element | null = node.parentElement;
+    while (current) {
+      if (
+        current.tagName === "SCRIPT" ||
+        current.tagName === "STYLE" ||
+        current.tagName === "NOSCRIPT" ||
+        current.tagName === "TEMPLATE"
+      ) {
+        return false;
+      }
+      current = current.parentElement;
+    }
+    return true;
+  }
+
+  function findStrictQuoteOffsets(
+    text: string,
+    exact: string,
+    prefix?: string,
+    suffix?: string,
+  ): { start: number; end: number } | null {
+    const perfectMatches: { start: number; end: number }[] = [];
+    const oneSidedMatches: { start: number; end: number }[] = [];
+    const allMatches: { start: number; end: number }[] = [];
     let searchFrom = 0;
 
     while (true) {
-      const idx = accumulated.indexOf(exact, searchFrom);
-      if (idx === -1) break;
+      const index = text.indexOf(exact, searchFrom);
+      if (index === -1) break;
 
-      let score = 0;
-      if (prefix && accumulated.slice(0, idx).endsWith(prefix)) score++;
-      if (suffix && accumulated.slice(idx + exact.length).startsWith(suffix)) score++;
+      const candidate = { start: index, end: index + exact.length };
+      const prefixMatched = Boolean(prefix) &&
+        text.slice(Math.max(0, index - prefix.length), index) === prefix;
+      const suffixMatched = Boolean(suffix) &&
+        text.slice(index + exact.length, index + exact.length + suffix.length) === suffix;
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestIdx = idx;
-        if (score === 2) break; // Perfect match
+      allMatches.push(candidate);
+      if (prefixMatched && suffixMatched) {
+        perfectMatches.push(candidate);
+      } else if (prefixMatched || suffixMatched) {
+        oneSidedMatches.push(candidate);
       }
 
-      searchFrom = idx + 1;
+      searchFrom = index + 1;
     }
 
-    if (bestIdx === -1) return null;
+    if (perfectMatches.length === 1) return perfectMatches[0];
+    if (perfectMatches.length > 1) return null;
+    if (oneSidedMatches.length === 1) return oneSidedMatches[0];
+    if (oneSidedMatches.length > 1) return null;
+    if (allMatches.length === 1 && exact.length >= 24) return allMatches[0];
+    return null;
+  }
 
-    // Find start and end nodes
-    let startNode: Text | undefined,
-      startOffset = 0,
-      endNode: Text | undefined,
-      endOffset = 0;
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
-      const nEnd = n.start + n.node.textContent!.length;
-      if (!startNode && bestIdx < nEnd) {
-        startNode = n.node;
-        startOffset = bestIdx - n.start;
+  function createRangeFromOffsets(
+    nodes: { node: Text; start: number; end: number }[],
+    start: number,
+    end: number,
+  ): Range | null {
+    let startNode: Text | null = null;
+    let endNode: Text | null = null;
+    let startOffset = 0;
+    let endOffset = 0;
+
+    for (const entry of nodes) {
+      if (!startNode && start < entry.end) {
+        startNode = entry.node;
+        startOffset = start - entry.start;
       }
-      if (bestIdx + exact.length <= nEnd) {
-        endNode = n.node;
-        endOffset = bestIdx + exact.length - n.start;
+      if (end <= entry.end) {
+        endNode = entry.node;
+        endOffset = end - entry.start;
         break;
       }
     }
@@ -900,15 +974,21 @@
   function renderRemoteSelection(
     email: string,
     color: string,
-    anchor: { selectors?: { type: string; exact?: string; prefix?: string; suffix?: string }[] },
+    anchor: {
+      selectors?: {
+        type: string;
+        exact?: string;
+        prefix?: string;
+        suffix?: string;
+        start?: number;
+        end?: number;
+      }[];
+    },
   ) {
     clearRemoteSelection(email);
     if (!anchor || !anchor.selectors) return;
 
-    const textQuote = anchor.selectors.find((s) => s.type === "TextQuoteSelector");
-    if (!textQuote) return;
-
-    const range = findTextRange(textQuote.exact!, textQuote.prefix, textQuote.suffix);
+    const range = findAnchorRange(anchor);
     if (!range) return;
 
     const marks = wrapRangeWithMarks(range, () => {

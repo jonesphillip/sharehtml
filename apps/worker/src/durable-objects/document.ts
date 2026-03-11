@@ -1,14 +1,21 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types.js";
 import type { ClientMessage, ServerMessage } from "@sharehtml/shared";
-import type { Comment, Reaction, UserPresence } from "@sharehtml/shared";
+import type { Anchor, Comment, Reaction, UserPresence } from "@sharehtml/shared";
 import { getRegistry } from "../utils/registry.js";
+import { findAnchorRangeInText, rebuildAnchor } from "../utils/anchors.js";
+import { diffText, mapRangeThroughDiff } from "../utils/text-diff.js";
 
 interface WsAttachment {
   email: string;
   name: string;
   color: string;
   verifiedEmail?: string;
+}
+
+interface DocumentSnapshot {
+  comments: Comment[];
+  reactions: Reaction[];
 }
 
 export class DocumentDO extends DurableObject<Env> {
@@ -87,6 +94,25 @@ export class DocumentDO extends DurableObject<Env> {
       }));
   }
 
+  private getSnapshot(): DocumentSnapshot {
+    return {
+      comments: this.getComments(),
+      reactions: this.getReactions(),
+    };
+  }
+
+  private rowToReaction(row: Record<string, SqlStorageValue>): Reaction {
+    return {
+      id: row.id as string,
+      document_id: "",
+      author_email: row.author_email as string,
+      author_name: row.author_name as string,
+      emoji: row.emoji as string,
+      anchor: JSON.parse(row.anchor as string),
+      created_at: row.created_at as string,
+    };
+  }
+
   private broadcast(msg: ServerMessage, exclude?: WebSocket) {
     const data = JSON.stringify(msg);
     for (const ws of this.ctx.getWebSockets()) {
@@ -143,6 +169,26 @@ export class DocumentDO extends DurableObject<Env> {
 
     if (url.pathname.endsWith("/comments") && request.method === "GET") {
       return Response.json({ comments: this.getComments() });
+    }
+
+    if (url.pathname.endsWith("/snapshot") && request.method === "GET") {
+      return Response.json(this.getSnapshot());
+    }
+
+    if (url.pathname.endsWith("/migrate-anchors") && request.method === "POST") {
+      const body = await request.json<{ oldText?: string; newText?: string }>();
+      if (typeof body.oldText !== "string" || typeof body.newText !== "string") {
+        return Response.json({ error: "oldText and newText are required" }, { status: 400 });
+      }
+
+      const summary = this.migrateAnchors(body.oldText, body.newText);
+      return Response.json(summary);
+    }
+
+    if (url.pathname.endsWith("/restore-snapshot") && request.method === "POST") {
+      const snapshot = await request.json<DocumentSnapshot>();
+      this.restoreSnapshot(snapshot);
+      return Response.json({ ok: true });
     }
 
     return new Response("Not found", { status: 404 });
@@ -440,6 +486,156 @@ export class DocumentDO extends DurableObject<Env> {
     };
 
     this.broadcast({ type: "reaction:added", reaction });
+  }
+
+  private migrateAnchors(oldText: string, newText: string) {
+    let updatedComments = 0;
+    let resolvedComments = 0;
+    let reactionsChanged = false;
+    const textDiff = diffText(oldText, newText);
+
+    const commentRows = this.sql.exec("SELECT * FROM comments ORDER BY created_at ASC").toArray();
+    for (const row of commentRows) {
+      const comment = this.rowToComment(row as Record<string, SqlStorageValue>);
+      if (!comment.anchor) continue;
+
+      const nextAnchor = this.remapAnchor(comment.anchor, oldText, newText, textDiff);
+      if (nextAnchor === "resolve") {
+        if (comment.resolved) continue;
+        this.sql.exec(
+          "UPDATE comments SET resolved = 1, updated_at = datetime('now') WHERE id = ?",
+          comment.id,
+        );
+        resolvedComments++;
+        this.broadcast({
+          type: "comment:resolved",
+          id: comment.id,
+          resolved: true,
+        });
+        continue;
+      }
+
+      if (!nextAnchor) continue;
+
+      this.sql.exec(
+        "UPDATE comments SET anchor = ?, updated_at = datetime('now') WHERE id = ?",
+        JSON.stringify(nextAnchor),
+        comment.id,
+      );
+      updatedComments++;
+
+      const updatedRows = this.sql.exec("SELECT * FROM comments WHERE id = ?", comment.id).toArray();
+      if (updatedRows.length > 0) {
+        this.broadcast({
+          type: "comment:updated",
+          comment: this.rowToComment(updatedRows[0] as Record<string, SqlStorageValue>),
+        });
+      }
+    }
+
+    const reactionRows = this.sql.exec("SELECT * FROM reactions ORDER BY created_at ASC").toArray();
+    for (const row of reactionRows) {
+      const reaction = this.rowToReaction(row as Record<string, SqlStorageValue>);
+      const nextAnchor = this.remapAnchor(reaction.anchor, oldText, newText, textDiff);
+
+      if (nextAnchor === "resolve") {
+        this.sql.exec("DELETE FROM reactions WHERE id = ?", reaction.id);
+        reactionsChanged = true;
+        continue;
+      }
+
+      if (!nextAnchor) continue;
+
+      this.sql.exec(
+        "UPDATE reactions SET anchor = ? WHERE id = ?",
+        JSON.stringify(nextAnchor),
+        reaction.id,
+      );
+      reactionsChanged = true;
+    }
+
+    if (reactionsChanged) {
+      this.broadcast({
+        type: "reactions:list",
+        reactions: this.getReactions(),
+      });
+    }
+
+    return { updatedComments, resolvedComments, reactionsChanged };
+  }
+
+  private restoreSnapshot(snapshot: DocumentSnapshot): void {
+    this.sql.exec("DELETE FROM comments");
+    this.sql.exec("DELETE FROM reactions");
+
+    for (const comment of snapshot.comments) {
+      this.sql.exec(
+        `INSERT INTO comments
+          (id, author_email, author_name, author_color, content, anchor, parent_id, resolved, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        comment.id,
+        comment.author_email,
+        comment.author_name,
+        comment.author_color,
+        comment.content,
+        comment.anchor ? JSON.stringify(comment.anchor) : null,
+        comment.parent_id,
+        comment.resolved ? 1 : 0,
+        comment.created_at,
+        comment.updated_at,
+      );
+    }
+
+    for (const reaction of snapshot.reactions) {
+      this.sql.exec(
+        `INSERT INTO reactions
+          (id, author_email, author_name, emoji, anchor, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        reaction.id,
+        reaction.author_email,
+        reaction.author_name,
+        reaction.emoji,
+        JSON.stringify(reaction.anchor),
+        reaction.created_at,
+      );
+    }
+
+    this.broadcast({
+      type: "comments:list",
+      comments: this.getComments(),
+    });
+    this.broadcast({
+      type: "reactions:list",
+      reactions: this.getReactions(),
+    });
+  }
+
+  private remapAnchor(
+    anchor: Anchor,
+    oldText: string,
+    newText: string,
+    textDiff: ReturnType<typeof diffText>,
+  ): Anchor | "resolve" | null {
+    const previousRange = findAnchorRangeInText(oldText, anchor);
+    if (!previousRange) {
+      return "resolve";
+    }
+
+    const migratedRange = mapRangeThroughDiff(previousRange, textDiff);
+    if (!migratedRange) {
+      return "resolve";
+    }
+
+    if (newText.slice(migratedRange.start, migratedRange.end) !== oldText.slice(previousRange.start, previousRange.end)) {
+      return "resolve";
+    }
+
+    const rebuiltAnchor = rebuildAnchor(anchor, newText, migratedRange.start, migratedRange.end);
+    if (JSON.stringify(rebuiltAnchor) === JSON.stringify(anchor)) {
+      return null;
+    }
+
+    return rebuiltAnchor;
   }
 
   private handleReactionRemove(

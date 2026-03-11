@@ -422,6 +422,7 @@ function handleServerMessage(msg: Record<string, unknown>) {
       const idx = comments.findIndex((c) => c.id === (msg.comment as Comment).id);
       if (idx >= 0) comments[idx] = msg.comment as Comment;
       renderComments();
+      updateHighlights();
       break;
     }
 

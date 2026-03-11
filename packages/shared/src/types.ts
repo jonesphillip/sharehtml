@@ -14,6 +14,12 @@ export interface TextQuoteSelector {
   suffix: string;
 }
 
+export interface TextPositionSelector {
+  type: "TextPositionSelector";
+  start: number;
+  end: number;
+}
+
 export interface CssSelector {
   type: "CssSelector";
   value: string;
@@ -28,7 +34,7 @@ export interface RegionSelector {
   height: number;
 }
 
-export type Selector = TextQuoteSelector | CssSelector | RegionSelector;
+export type Selector = TextQuoteSelector | TextPositionSelector | CssSelector | RegionSelector;
 
 export interface Anchor {
   selectors: Selector[];

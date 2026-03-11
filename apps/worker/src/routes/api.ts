@@ -3,8 +3,54 @@ import type { AppBindings } from "../types.js";
 import { apiAuth } from "../utils/auth.js";
 import { nanoid } from "../utils/ids.js";
 import { getRegistry } from "../utils/registry.js";
+import { extractDocumentTextFromHtml } from "../utils/document-text.js";
+import type { Comment, Reaction } from "@sharehtml/shared";
 
 const api = new Hono<AppBindings>();
+
+interface DocumentSnapshot {
+  comments: Comment[];
+  reactions: Reaction[];
+}
+
+async function migrateDocumentAnchors(
+  documentDo: DurableObjectStub,
+  oldText: string,
+  newText: string,
+): Promise<void> {
+  const response = await documentDo.fetch("https://document.local/migrate-anchors", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ oldText, newText }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`anchor migration failed with status ${response.status}`);
+  }
+}
+
+async function getDocumentSnapshot(documentDo: DurableObjectStub): Promise<DocumentSnapshot> {
+  const response = await documentDo.fetch("https://document.local/snapshot");
+  if (!response.ok) {
+    throw new Error(`snapshot failed with status ${response.status}`);
+  }
+  return response.json<DocumentSnapshot>();
+}
+
+async function restoreDocumentSnapshot(
+  documentDo: DurableObjectStub,
+  snapshot: DocumentSnapshot,
+): Promise<void> {
+  const response = await documentDo.fetch("https://document.local/restore-snapshot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(snapshot),
+  });
+
+  if (!response.ok) {
+    throw new Error(`snapshot restore failed with status ${response.status}`);
+  }
+}
 
 api.use("/*", apiAuth);
 
@@ -147,6 +193,7 @@ api.put("/documents/:id", async (c) => {
 
   const filename = file.name || "document.html";
   const resolvedTitle = title || filename.replace(/\.(html?|md|markdown)$/i, "");
+  const nextHtml = await file.text();
 
   const registry = getRegistry(c.env);
   const meta = await registry.getDocument(id);
@@ -159,15 +206,59 @@ api.put("/documents/:id", async (c) => {
     return c.json({ error: "forbidden" }, 403);
   }
 
-  // Delete old R2, store new R2, and update registry in parallel
-  await Promise.all([
-    c.env.DOCUMENTS_BUCKET.delete(`${id}/${meta.filename}`),
-    c.env.DOCUMENTS_BUCKET.put(`${id}/${filename}`, file.stream(), {
+  const currentObject = await c.env.DOCUMENTS_BUCKET.get(`${id}/${meta.filename}`);
+  const currentHtml = currentObject ? await currentObject.text() : null;
+  const documentDoId = c.env.DOCUMENT_DO.idFromName(id);
+  const documentDo = c.env.DOCUMENT_DO.get(documentDoId);
+  const oldKey = `${id}/${meta.filename}`;
+  const finalKey = `${id}/${filename}`;
+  const tempKey = `${id}/.__pending__.${Date.now()}.${filename}`;
+
+  let oldText: string | null = null;
+  let newText: string | null = null;
+  let snapshot: DocumentSnapshot | null = null;
+  if (currentHtml !== null) {
+    [oldText, newText, snapshot] = await Promise.all([
+      extractDocumentTextFromHtml(currentHtml),
+      extractDocumentTextFromHtml(nextHtml),
+      getDocumentSnapshot(documentDo),
+    ]);
+  }
+
+  let didMigrateAnchors = false;
+
+  await c.env.DOCUMENTS_BUCKET.put(tempKey, nextHtml, {
+    httpMetadata: { contentType: "text/html" },
+    customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email as string },
+  });
+
+  try {
+    if (oldText !== null && newText !== null) {
+      await migrateDocumentAnchors(documentDo, oldText, newText);
+      didMigrateAnchors = true;
+    }
+
+    await c.env.DOCUMENTS_BUCKET.put(finalKey, nextHtml, {
       httpMetadata: { contentType: "text/html" },
       customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email as string },
-    }),
-    registry.updateDocument(id, { title: resolvedTitle, filename, size: file.size }),
-  ]);
+    });
+    await registry.updateDocument(id, { title: resolvedTitle, filename, size: file.size });
+
+    if (oldKey !== finalKey) {
+      await c.env.DOCUMENTS_BUCKET.delete(oldKey);
+    }
+  } catch (error) {
+    if (didMigrateAnchors && snapshot) {
+      try {
+        await restoreDocumentSnapshot(documentDo, snapshot);
+      } catch {
+        // Best effort rollback only.
+      }
+    }
+    throw error;
+  } finally {
+    await c.env.DOCUMENTS_BUCKET.delete(tempKey).catch(() => {});
+  }
 
   const url = new URL(c.req.url);
   const docUrl = `${url.origin}/d/${id}`;
