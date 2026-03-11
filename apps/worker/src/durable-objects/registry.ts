@@ -55,26 +55,6 @@ export class RegistryDO extends DurableObject<Env> {
         PRIMARY KEY (user_email, doc_id)
       )
     `);
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS api_tokens (
-        token_hash TEXT PRIMARY KEY,
-        user_email TEXT NOT NULL UNIQUE,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        expires_at TEXT NOT NULL DEFAULT ''
-      )
-    `);
-    // Migration: add expires_at to existing tables
-    try {
-      this.sql.exec(
-        "ALTER TABLE api_tokens ADD COLUMN expires_at TEXT DEFAULT ''",
-      );
-      // Backfill existing tokens: expire 90 days from their creation
-      this.sql.exec(
-        "UPDATE api_tokens SET expires_at = datetime(created_at, '+90 days') WHERE expires_at = ''",
-      );
-    } catch {
-      // Column already exists
-    }
   }
 
   private pickColor(): string {
@@ -188,46 +168,5 @@ export class RegistryDO extends DurableObject<Env> {
 
   async deleteDocument(id: string) {
     this.sql.exec("DELETE FROM documents WHERE id = ?", id);
-  }
-
-  async createToken(tokenHash: string, email: string) {
-    this.sql.exec(
-      "INSERT OR REPLACE INTO api_tokens (token_hash, user_email, expires_at) VALUES (?, ?, datetime('now', '+90 days'))",
-      tokenHash,
-      email,
-    );
-  }
-
-  async getTokenUser(
-    tokenHash: string,
-  ): Promise<{ user_email: string; expired: boolean } | null> {
-    const rows = this.sql
-      .exec(
-        "SELECT user_email, expires_at, expires_at <= datetime('now') as expired FROM api_tokens WHERE token_hash = ?",
-        tokenHash,
-      )
-      .toArray();
-    if (rows.length === 0) return null;
-    return {
-      user_email: rows[0].user_email as string,
-      expired: Boolean(rows[0].expired),
-    };
-  }
-
-  async getTokenForUser(
-    email: string,
-  ): Promise<{ token_hash: string; created_at: string; expires_at: string } | null> {
-    const rows = this.sql
-      .exec(
-        "SELECT token_hash, created_at, expires_at FROM api_tokens WHERE user_email = ? LIMIT 1",
-        email,
-      )
-      .toArray();
-    if (rows.length === 0) return null;
-    return rows[0] as { token_hash: string; created_at: string; expires_at: string };
-  }
-
-  async deleteTokensForUser(email: string) {
-    this.sql.exec("DELETE FROM api_tokens WHERE user_email = ?", email);
   }
 }

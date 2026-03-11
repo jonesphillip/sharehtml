@@ -6,7 +6,6 @@ export interface Env {
   DOCUMENT_DO: DurableObjectNamespace<DocumentDO>;
   REGISTRY_DO: DurableObjectNamespace<RegistryDO>;
   ASSETS: Fetcher;
-  API_KEY: string;
   AUTH_MODE: "access" | "none";
   ACCESS_AUD?: string;
   ACCESS_TEAM?: string;

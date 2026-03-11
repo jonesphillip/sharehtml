@@ -6,6 +6,7 @@ import { openCmd } from "./commands/open.js";
 import { deleteCmd } from "./commands/delete.js";
 import { pullCmd } from "./commands/pull.js";
 import { configCmd } from "./commands/config.js";
+import { loginCmd } from "./commands/login.js";
 
 const program = new Command();
 
@@ -20,5 +21,6 @@ program.addCommand(openCmd);
 program.addCommand(deleteCmd);
 program.addCommand(pullCmd);
 program.addCommand(configCmd);
+program.addCommand(loginCmd);
 
 program.parse();

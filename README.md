@@ -29,7 +29,7 @@ pnpm install
 pnpm run setup
 ```
 
-The interactive setup script walks you through everything: deploying the worker, installing the CLI, and generating an API token. Cloudflare Access is optional — the setup script asks if you want authentication. Without it, anyone with a link can view and comment.
+The interactive setup script walks you through everything: deploying the worker, installing the CLI, and configuring authentication. Cloudflare Access is optional — the setup script asks if you want authentication. Without it, anyone with a link can view and comment.
 
 If you enable Cloudflare Access, you'll need a [Cloudflare API token](https://dash.cloudflare.com/profile/api-tokens) with these permissions:
 - **Account > Access: Apps and Policies > Edit**
@@ -69,7 +69,6 @@ To use the CLI locally:
 
 ```bash
 sharehtml config set-url http://localhost:5173
-sharehtml config set-key dev
 sharehtml deploy my-report.html
 ```
 
@@ -79,14 +78,14 @@ sharehtml deploy my-report.html
 CLI ──► Worker ──► R2 (HTML storage)
          │
 Browser ◄┘──► Durable Objects
-               ├── RegistryDO (users, documents, tokens, views)
+               ├── RegistryDO (users, documents, views)
                └── DocumentDO (per-doc comments, reactions, presence via WebSocket)
 ```
 
 | Component | Purpose |
 |-----------|---------|
 | **[Worker](https://developers.cloudflare.com/workers/)** | HTTP routing, auth, serves viewer shell and home page |
-| **RegistryDO** | Global [Durable Object](https://developers.cloudflare.com/durable-objects/) — users, document metadata, API tokens, view history (SQLite) |
+| **RegistryDO** | Global [Durable Object](https://developers.cloudflare.com/durable-objects/) — users, document metadata, view history (SQLite) |
 | **DocumentDO** | Per-document Durable Object — comments, reactions, real-time presence over WebSocket |
 | **[R2](https://developers.cloudflare.com/r2/)** | Stores the actual HTML files |
 | **CLI** | Bun-based command-line tool for deploying and managing documents |
@@ -99,14 +98,9 @@ Browser ◄┘──► Durable Objects
 | `sharehtml list` | List your documents |
 | `sharehtml open <id>` | Open a document in the browser |
 | `sharehtml delete <id>` | Delete a document |
-| `sharehtml config init` | Interactive setup (URL + API key) |
-| `sharehtml config set-url <url>` | Set the worker URL |
-| `sharehtml config set-key <key>` | Set your API token |
+| `sharehtml login` | Log in through Cloudflare Access |
+| `sharehtml config set-url <url>` | Set the sharehtml URL |
 | `sharehtml config show` | Show current configuration |
-
-## API Tokens
-
-API tokens authenticate CLI requests. Each user has one token. The setup script generates one automatically, but you can manage tokens at `/tokens` on your sharehtml instance (generate, regenerate, or revoke).
 
 ## Configuration
 
@@ -128,20 +122,18 @@ apps/
 │   │   ├── routes/
 │   │   │   ├── api.ts                # REST API (CRUD documents)
 │   │   │   ├── viewer.ts             # Document viewer + WebSocket proxy
-│   │   │   └── tokens.ts             # Token management pages
 │   │   ├── durable-objects/
-│   │   │   ├── registry.ts           # RegistryDO — users, docs, tokens, views
+│   │   │   ├── registry.ts           # RegistryDO — users, docs, views
 │   │   │   └── document.ts           # DocumentDO — comments, reactions, presence
 │   │   ├── frontend/
 │   │   │   ├── home.tsx              # Home page (document list)
 │   │   │   ├── shell.tsx             # Document viewer shell
-│   │   │   └── tokens.tsx            # Token management page
 │   │   ├── client/
 │   │   │   ├── shell-client.ts       # Viewer shell JS (presence, sidebar)
 │   │   │   ├── collab-client.ts      # In-iframe collaboration (comments, reactions)
 │   │   │   └── styles.css            # Shared styles
 │   │   └── utils/
-│   │       ├── auth.ts               # CF Access JWT + API token verification
+│   │       ├── auth.ts               # CF Access JWT verification
 │   │       ├── registry.ts           # getRegistry() helper
 │   │       ├── crypto.ts             # sha256 utility
 │   │       ├── assets.ts             # Vite asset URL resolution

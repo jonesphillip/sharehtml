@@ -17,6 +17,7 @@ interface HomeParams {
   workerUrl: string;
   documents: Document[];
   recentViews: Document[];
+  requiresLogin: boolean;
 }
 
 function relativeTime(dateStr: string): string {
@@ -52,7 +53,13 @@ function DocCard({ doc, subtitle }: { doc: Document; subtitle: string }) {
   );
 }
 
-export function HomeView({ email, workerUrl, documents, recentViews }: HomeParams): HtmlEscapedString {
+export function HomeView({
+  email,
+  workerUrl,
+  documents,
+  recentViews,
+  requiresLogin,
+}: HomeParams): HtmlEscapedString {
   return (
     <html lang="en">
       <head>
@@ -93,13 +100,6 @@ export function HomeView({ email, workerUrl, documents, recentViews }: HomeParam
             align-items: center;
             gap: 12px;
           }
-          .topbar-link {
-            font-size: 12px;
-            font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
-            color: #a3a3a3;
-            text-decoration: none;
-          }
-          .topbar-link:hover { color: #000000; }
           .topbar-email {
             font-size: 12px;
             font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
@@ -212,9 +212,6 @@ export function HomeView({ email, workerUrl, documents, recentViews }: HomeParam
         <div class="topbar">
           <div class="topbar-title">sharehtml</div>
           <div class="topbar-right">
-            <a class="topbar-link" href="/tokens">
-              [tokens]
-            </a>
             <span class="topbar-email">{email}</span>
           </div>
         </div>
@@ -243,8 +240,7 @@ export function HomeView({ email, workerUrl, documents, recentViews }: HomeParam
                 <div class="setup-block">
                   <p>
                     Deploy HTML or Markdown files with the{" "}
-                    <a href="https://github.com/jonesphillip/sharehtml">sharehtml CLI</a>.{" "}
-                    Grab an API token from <a href="/tokens">/tokens</a>, then:
+                    <a href="https://github.com/jonesphillip/sharehtml">sharehtml CLI</a>, then:
                   </p>
                   {raw(`<pre><span class="cmd-comment"># install the CLI</span>
 git clone https://github.com/jonesphillip/sharehtml.git
@@ -253,7 +249,7 @@ cd apps/cli && pnpm build && bun link
 
 <span class="cmd-comment"># configure</span>
 sharehtml config set-url ${workerUrl}
-sharehtml config set-key &lt;your-token&gt;
+${requiresLogin ? "sharehtml login\n" : ""}
 
 <span class="cmd-comment"># deploy a file</span>
 sharehtml deploy example/coffee-report.html</pre>`)}

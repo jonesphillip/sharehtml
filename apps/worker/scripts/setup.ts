@@ -47,6 +47,15 @@ async function confirm(question: string, defaultYes = true): Promise<boolean> {
   return answer.toLowerCase() === "y" || answer.toLowerCase() === "yes";
 }
 
+async function commandExists(cmd: string): Promise<boolean> {
+  try {
+    await run("which", [cmd]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function run(cmd: string, args: string[], opts?: { input?: string; cwd?: string }): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile(cmd, args, {
@@ -102,6 +111,68 @@ async function cfApi(
   return json.result;
 }
 
+function normalizeAccessDomain(domain: string | undefined): string {
+  return (domain ?? "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+}
+
+function isApiAccessDomain(domain: string | undefined, hostname: string): boolean {
+  const normalized = normalizeAccessDomain(domain);
+  return (
+    normalized === `${hostname}/api` ||
+    normalized === `${hostname}/api*` ||
+    normalized === `${hostname}/api/*` ||
+    normalized.startsWith(`${hostname}/api/`)
+  );
+}
+
+function resolveAppPolicies(app: any, policies: any[]): any[] {
+  if (!Array.isArray(app?.policies)) return [];
+  return app.policies
+    .map((policy: any) => {
+      if (policy?.decision) return policy;
+      const id = typeof policy === "string" ? policy : policy?.id;
+      return policies.find((candidate: any) => candidate.id === id);
+    })
+    .filter(Boolean);
+}
+
+function policyIncludesEveryone(policy: any): boolean {
+  return (
+    Array.isArray(policy?.include) &&
+    policy.include.some((rule: any) => typeof rule === "object" && rule !== null && "everyone" in rule)
+  );
+}
+
+function isLegacyApiBypassApp(app: any, hostname: string, configName: string, policies: any[]): boolean {
+  if (app?.name !== `${configName}-api`) return false;
+  if (!isApiAccessDomain(app?.domain, hostname)) return false;
+
+  const resolvedPolicies = resolveAppPolicies(app, policies);
+  return (
+    resolvedPolicies.length > 0 &&
+    resolvedPolicies.every((policy: any) => policy?.decision === "bypass") &&
+    resolvedPolicies.some(policyIncludesEveryone)
+  );
+}
+
+function getApiPathApps(apps: any[], hostname: string): any[] {
+  return apps.filter((app: any) => isApiAccessDomain(app?.domain, hostname));
+}
+
+function describePolicy(policy: any): string {
+  const parts: string[] = [];
+  const includes = Array.isArray(policy?.include) ? policy.include : [];
+
+  for (const rule of includes) {
+    if (rule?.email?.email) parts.push(rule.email.email);
+    if (rule?.email_domain?.domain) parts.push(`*@${rule.email_domain.domain}`);
+    if (rule?.everyone) parts.push("everyone");
+  }
+
+  const suffix = parts.length > 0 ? ` — ${parts.join(", ")}` : "";
+  return `${policy.name || policy.id} (${policy.decision || "unknown"})${suffix}`;
+}
+
 function openUrl(url: string) {
   try {
     const cmd = process.platform === "darwin" ? "open" : "xdg-open";
@@ -133,6 +204,30 @@ function parseWranglerConfig(path: string): { name: string } {
 }
 
 type SelectOption = { label: string; value: string; selected: boolean };
+type AccessPolicy = {
+  id: string;
+  name?: string;
+  decision?: string;
+  include?: Array<Record<string, unknown>>;
+  reusable?: boolean;
+};
+type AccessApp = {
+  id: string;
+  name?: string;
+  domain?: string;
+  aud?: string;
+  policies?: Array<string | AccessPolicy | { id?: string; decision?: string }>;
+};
+type ExistingAccessState = {
+  rootApp: AccessApp | null;
+  rootPolicies: AccessPolicy[];
+};
+type SelectedPolicyState = {
+  policyIds: string[];
+  policyLabels: string[];
+  newIncludeRules: Array<Record<string, unknown>>;
+  shouldSelectPolicies: boolean;
+};
 
 function multiSelect(title: string, options: SelectOption[]): Promise<SelectOption[]> {
   return new Promise((resolve) => {
@@ -208,6 +303,264 @@ function fail(message: string): never {
   process.exit(1);
 }
 
+async function inspectExistingAccessState(
+  cfToken: string,
+  accountId: string,
+  hostname: string,
+  appName: string,
+  existingApps: AccessApp[],
+): Promise<ExistingAccessState> {
+  const existingRootAppSummary = existingApps.find(
+    (app) => normalizeAccessDomain(app.domain) === hostname && app.name === appName,
+  );
+
+  if (!existingRootAppSummary?.id) {
+    return { rootApp: null, rootPolicies: [] };
+  }
+
+  const state = { rootApp: null as AccessApp | null, rootPolicies: [] as AccessPolicy[] };
+  const s = spinner("Inspecting existing Access app...", true);
+  try {
+    const [rootApp, rootPolicies] = await Promise.all([
+      cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps/${existingRootAppSummary.id}`),
+      cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps/${existingRootAppSummary.id}/policies`).catch(
+        () => [],
+      ),
+    ]);
+    state.rootApp = rootApp;
+    state.rootPolicies = rootPolicies;
+    s.stop("Existing Access app found");
+    return state;
+  } catch (e: any) {
+    s.stop();
+    fail(`Failed to inspect existing Access app: ${e.message}`);
+  }
+}
+
+function buildPolicyOptions(
+  reusablePolicies: AccessPolicy[],
+  wranglerEmail: string | undefined,
+): SelectOption[] {
+  const options: SelectOption[] = [];
+
+  for (const policy of reusablePolicies) {
+    const emails = policy.include
+      ?.filter((rule: any) => rule.email)
+      .map((rule: any) => rule.email.email);
+    const domains = policy.include
+      ?.filter((rule: any) => rule.email_domain)
+      .map((rule: any) => rule.email_domain.domain);
+    const parts = [...(emails ?? []), ...(domains ?? []).map((domain: string) => `*@${domain}`)];
+    const detail = parts.length > 0 ? dim(` — ${parts.join(", ")}`) : "";
+    options.push({
+      label: `${policy.name}${detail}`,
+      value: `policy:${policy.id}`,
+      selected: false,
+    });
+  }
+
+  if (wranglerEmail) {
+    options.push({
+      label: `${wranglerEmail} only ${dim("(new policy)")}`,
+      value: `email:${wranglerEmail}`,
+      selected: reusablePolicies.length === 0,
+    });
+  }
+
+  options.push({
+    label: `Custom emails... ${dim("(new policy)")}`,
+    value: "custom",
+    selected: !wranglerEmail && reusablePolicies.length === 0,
+  });
+
+  return options;
+}
+
+async function selectAccessPolicies(
+  existingRootApp: AccessApp | null,
+  existingRootPolicies: AccessPolicy[],
+  reusablePolicies: AccessPolicy[],
+  wranglerEmail: string | undefined,
+): Promise<SelectedPolicyState> {
+  const selected: SelectedPolicyState = {
+    policyIds: [],
+    policyLabels: [],
+    newIncludeRules: [],
+    shouldSelectPolicies: !existingRootApp || existingRootPolicies.length === 0,
+  };
+
+  if (existingRootApp && existingRootPolicies.length > 0) {
+    console.log();
+    console.log(`  ${dim("access")}    existing app ${bold(existingRootApp.name || existingRootApp.id)}`);
+    for (const policy of existingRootPolicies) {
+      console.log(`    ${dim("-")} ${describePolicy(policy)}`);
+    }
+    console.log();
+
+    selected.shouldSelectPolicies = !(await confirm("Keep the existing Access policies?", true));
+    if (!selected.shouldSelectPolicies) {
+      selected.policyLabels = existingRootPolicies.map((policy) => policy.name || policy.id);
+      return selected;
+    }
+  } else if (existingRootApp) {
+    console.log();
+    console.log(`  ${dim("access")}    existing app ${bold(existingRootApp.name || existingRootApp.id)} has no attached policies`);
+    console.log();
+  }
+
+  if (!selected.shouldSelectPolicies) {
+    return selected;
+  }
+
+  console.log();
+  const options = buildPolicyOptions(reusablePolicies, wranglerEmail);
+  const selectedOptions = await multiSelect("Who should have access?", options);
+  console.log();
+
+  let needsCustomEmails = false;
+  for (const option of selectedOptions) {
+    if (option.value === "custom") {
+      needsCustomEmails = true;
+      continue;
+    }
+
+    if (option.value.startsWith("policy:")) {
+      const id = option.value.slice(7);
+      selected.policyIds.push(id);
+      selected.policyLabels.push(reusablePolicies.find((policy) => policy.id === id)?.name ?? id);
+      continue;
+    }
+
+    if (option.value.startsWith("email:")) {
+      const email = option.value.slice(6);
+      selected.newIncludeRules.push({ email: { email } });
+      selected.policyLabels.push(email);
+    }
+  }
+
+  if (needsCustomEmails) {
+    const emailsInput = await prompt("Enter email addresses (comma-separated):");
+    const emails = emailsInput.split(",").map((email) => email.trim()).filter(Boolean);
+    for (const email of emails) {
+      selected.newIncludeRules.push({ email: { email } });
+      selected.policyLabels.push(email);
+    }
+    console.log();
+  }
+
+  if (selected.policyIds.length === 0 && selected.newIncludeRules.length === 0) {
+    fail("At least one access policy is required");
+  }
+
+  return selected;
+}
+
+async function reconcileRootAccessApp(
+  cfToken: string,
+  accountId: string,
+  hostname: string,
+  appName: string,
+  existingRootApp: AccessApp | null,
+  selectedPolicies: SelectedPolicyState,
+): Promise<AccessApp> {
+  const policyIds = [...selectedPolicies.policyIds];
+
+  if (selectedPolicies.shouldSelectPolicies && selectedPolicies.newIncludeRules.length > 0) {
+    const newPolicy = await cfApi(cfToken, "POST", `/accounts/${accountId}/access/policies`, {
+      name: `${appName}-allow`,
+      decision: "allow",
+      include: selectedPolicies.newIncludeRules,
+      session_duration: "24h",
+    });
+    policyIds.push(newPolicy.id);
+  }
+
+  if (!existingRootApp) {
+    return cfApi(cfToken, "POST", `/accounts/${accountId}/access/apps`, {
+      name: appName,
+      domain: hostname,
+      type: "self_hosted",
+      session_duration: "24h",
+      policies: policyIds.map((id) => ({ id })),
+    });
+  }
+
+  if (!selectedPolicies.shouldSelectPolicies) {
+    return existingRootApp;
+  }
+
+  return cfApi(cfToken, "PUT", `/accounts/${accountId}/access/apps/${existingRootApp.id}`, {
+    ...existingRootApp,
+    policies: policyIds.map((id) => ({ id })),
+  });
+}
+
+async function migrateLegacyApiAccessApp(
+  cfToken: string,
+  accountId: string,
+  hostname: string,
+  configName: string,
+  existingApps: AccessApp[],
+  existingPolicies: AccessPolicy[],
+): Promise<void> {
+  const apiPathApps = getApiPathApps(existingApps, hostname);
+  if (apiPathApps.length === 0) return;
+  if (apiPathApps.length > 1) {
+    fail("Multiple /api Access apps exist for this hostname. Remove them manually, then run setup again.");
+  }
+
+  const apiPathApp = apiPathApps[0].id
+    ? await cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps/${apiPathApps[0].id}`)
+    : apiPathApps[0];
+
+  if (!isLegacyApiBypassApp(apiPathApp, hostname, configName, existingPolicies)) {
+    fail(
+      `Found an existing /api Access app (${apiPathApp.name || apiPathApp.id}) that does not match the old sharehtml bypass config. Remove or change it manually, then run setup again.`,
+    );
+  }
+
+  const migrate = await confirm(
+    `Found legacy API-only Access app ${bold(apiPathApp.name || apiPathApp.id)}. Remove it and keep the root app so CLI login works?`,
+  );
+  if (!migrate) {
+    fail("Migration cancelled. Remove the legacy /api Access app to use CLI login.");
+  }
+
+  const s = spinner("Removing legacy API-only Access app...", true);
+  try {
+    await cfApi(cfToken, "DELETE", `/accounts/${accountId}/access/apps/${apiPathApp.id}`);
+    s.stop("Removed legacy API-only Access app");
+  } catch (e: any) {
+    s.stop();
+    fail(`Failed to remove legacy API-only Access app: ${e.message}`);
+  }
+}
+
+async function ensureCloudflaredForCli(): Promise<void> {
+  console.log();
+  const hasCloudflared = await commandExists("cloudflared");
+  if (hasCloudflared) return;
+
+  const cloudflaredInstallUrl =
+    "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/";
+  const hasBrew = process.platform === "darwin" && await commandExists("brew");
+
+  if (hasBrew && await confirm("Install cloudflared with Homebrew (required for CLI login)?")) {
+    const s = spinner("Installing cloudflared...");
+    try {
+      await run("brew", ["install", "cloudflared"]);
+      s.stop("cloudflared installed");
+      return;
+    } catch (e: any) {
+      s.stop();
+      console.log(`  ${dim(`cloudflared install failed: ${e.message}`)}`);
+    }
+  }
+
+  console.log(`  ${dim("cloudflared is required before running: sharehtml login")}`);
+  console.log(`  ${dim(cloudflaredInstallUrl)}`);
+}
+
 async function main() {
   console.log();
   console.log(`  ${bold("sharehtml")} setup`);
@@ -272,14 +625,14 @@ async function main() {
 
   if (useAccess) {
     console.log();
-    const apiTokenUrl = "https://dash.cloudflare.com/profile/api-tokens";
-    console.log(`  Create an API token with these permissions:`);
+    const cfTokenUrl = "https://dash.cloudflare.com/profile/api-tokens";
+    console.log(`  Create a Cloudflare API token with these permissions:`);
     console.log(`    ${dim("-")} Access: Apps and Policies Edit`);
     console.log(`    ${dim("-")} Access: Organizations Read`);
     console.log(`  ${dim("Used once to configure Access policies, then discarded.")}`);
     console.log();
-    if (await confirm(`Open ${cyan(apiTokenUrl)}?`)) {
-      openUrl(apiTokenUrl);
+    if (await confirm(`Open ${cyan(cfTokenUrl)}?`)) {
+      openUrl(cfTokenUrl);
     }
     console.log();
     const cfToken = await promptSecret("Paste your API token:");
@@ -296,7 +649,6 @@ async function main() {
 
     const accountId = wranglerAccount.id;
 
-    // Fetch existing reusable policies and apps
     s = spinner("Loading Access configuration...", true);
     const [existingPolicies, existingApps] = await Promise.all([
       cfApi(cfToken, "GET", `/accounts/${accountId}/access/policies`).catch(() => []),
@@ -304,142 +656,48 @@ async function main() {
     ]);
     s.stop();
 
-    // Filter to reusable allow policies for the selector
-    const reusablePolicies = existingPolicies.filter((p: any) => p.reusable && p.decision === "allow");
-    const bypassPolicies = existingPolicies.filter((p: any) => p.reusable && p.decision === "bypass");
+    const accessState = await inspectExistingAccessState(
+      cfToken,
+      accountId,
+      hostname,
+      config.name,
+      existingApps,
+    );
+    const reusablePolicies = existingPolicies.filter(
+      (policy: AccessPolicy) => policy.reusable && policy.decision === "allow",
+    );
+    const selectedPolicies = await selectAccessPolicies(
+      accessState.rootApp,
+      accessState.rootPolicies,
+      reusablePolicies,
+      wranglerEmail,
+    );
 
-    // Build policy selection
-    console.log();
-    const options: SelectOption[] = [];
-
-    for (const policy of reusablePolicies) {
-      const emails = policy.include
-        ?.filter((r: any) => r.email)
-        .map((r: any) => r.email.email);
-      const domains = policy.include
-        ?.filter((r: any) => r.email_domain)
-        .map((r: any) => r.email_domain.domain);
-      const parts = [...(emails ?? []), ...(domains ?? []).map((d: string) => `*@${d}`)];
-      const detail = parts.length ? dim(` — ${parts.join(", ")}`) : "";
-      options.push({
-        label: `${policy.name}${detail}`,
-        value: `policy:${policy.id}`,
-        selected: false,
-      });
-    }
-
-    if (wranglerEmail) {
-      options.push({
-        label: `${wranglerEmail} only ${dim("(new policy)")}`,
-        value: `email:${wranglerEmail}`,
-        selected: reusablePolicies.length === 0,
-      });
-    }
-
-    options.push({
-      label: `Custom emails... ${dim("(new policy)")}`,
-      value: "custom",
-      selected: !wranglerEmail && reusablePolicies.length === 0,
-    });
-
-    const selected = await multiSelect("Who should have access?", options);
-    console.log();
-
-    // Build browser app policies from selections
-    const browserPolicyIds: string[] = [];
-    let newIncludeRules: any[] = [];
-    let needCustom = false;
-    const policyParts: string[] = [];
-
-    for (const opt of selected) {
-      if (opt.value === "custom") {
-        needCustom = true;
-      } else if (opt.value.startsWith("policy:")) {
-        const id = opt.value.slice(7);
-        browserPolicyIds.push(id);
-        const name = reusablePolicies.find((p: any) => p.id === id)?.name ?? id;
-        policyParts.push(name);
-      } else if (opt.value.startsWith("email:")) {
-        const email = opt.value.slice(6);
-        newIncludeRules.push({ email: { email } });
-        policyParts.push(email);
-      }
-    }
-
-    if (needCustom) {
-      const emailsInput = await prompt("Enter email addresses (comma-separated):");
-      const emails = emailsInput.split(",").map((e) => e.trim()).filter(Boolean);
-      for (const email of emails) {
-        newIncludeRules.push({ email: { email } });
-        policyParts.push(email);
-      }
-      console.log();
-    }
-
-    if (browserPolicyIds.length === 0 && newIncludeRules.length === 0) {
-      fail("At least one access policy is required");
-    }
-
-    // Create reusable policies for new rules, then attach all by ID
     s = spinner("Configuring Access...", true);
-    let browserApp: any;
-    let apiApp: any;
+    let browserApp: AccessApp;
     try {
-      // Create a reusable allow policy if user entered new emails
-      if (newIncludeRules.length > 0) {
-        const newPolicy = await cfApi(cfToken, "POST", `/accounts/${accountId}/access/policies`, {
-          name: `${config.name}-allow`,
-          decision: "allow",
-          include: newIncludeRules,
-          session_duration: "24h",
-        });
-        browserPolicyIds.push(newPolicy.id);
-      }
-
-      // Find or create a reusable bypass policy for the API app
-      let bypassPolicyId: string | undefined;
-      if (bypassPolicies.length > 0) {
-        bypassPolicyId = bypassPolicies[0].id;
-      } else {
-        const bypassPolicy = await cfApi(cfToken, "POST", `/accounts/${accountId}/access/policies`, {
-          name: `${config.name}-bypass`,
-          decision: "bypass",
-          include: [{ everyone: {} }],
-          session_duration: "24h",
-        });
-        bypassPolicyId = bypassPolicy.id;
-      }
-
-      // Create Access apps with policy references
-      const appName = config.name;
-      const apiAppName = `${config.name}-api`;
-
-      browserApp = existingApps.find((a: any) => a.domain === hostname && a.name === appName);
-      if (!browserApp) {
-        browserApp = await cfApi(cfToken, "POST", `/accounts/${accountId}/access/apps`, {
-          name: appName,
-          domain: hostname,
-          type: "self_hosted",
-          session_duration: "24h",
-          policies: browserPolicyIds.map((id) => ({ id })),
-        });
-      }
-
-      apiApp = existingApps.find((a: any) => a.domain === `${hostname}/api/*` && a.name === apiAppName);
-      if (!apiApp) {
-        apiApp = await cfApi(cfToken, "POST", `/accounts/${accountId}/access/apps`, {
-          name: apiAppName,
-          domain: `${hostname}/api/*`,
-          type: "self_hosted",
-          policies: [{ id: bypassPolicyId }],
-        });
-      }
-
-      s.stop(`Access configured for ${policyParts.join(", ")}`);
+      browserApp = await reconcileRootAccessApp(
+        cfToken,
+        accountId,
+        hostname,
+        config.name,
+        accessState.rootApp,
+        selectedPolicies,
+      );
+      s.stop(`Access configured for ${selectedPolicies.policyLabels.join(", ")}`);
     } catch (e: any) {
       s.stop();
       fail(`Access configuration failed: ${e.message}`);
     }
+
+    await migrateLegacyApiAccessApp(
+      cfToken,
+      accountId,
+      hostname,
+      config.name,
+      existingApps,
+      existingPolicies,
+    );
 
     // Secrets
     s = spinner("Setting secrets...", true);
@@ -502,13 +760,8 @@ async function main() {
     }
   }
 
-  // Token generation
-  console.log();
-  const tokenUrl = `${workerUrl}/tokens`;
-  console.log(`  To deploy documents, generate an API token:`);
-  console.log();
-  if (await confirm(`Open ${cyan(tokenUrl)}?`)) {
-    openUrl(tokenUrl);
+  if (useAccess) {
+    await ensureCloudflaredForCli();
   }
 
   // Done
@@ -516,7 +769,9 @@ async function main() {
   console.log(`  ${bold("Setup complete")}`);
   console.log();
   console.log(`    ${dim("$")} ${cliCmd} config set-url ${workerUrl}`);
-  console.log(`    ${dim("$")} ${cliCmd} config set-key <token>`);
+  if (useAccess) {
+    console.log(`    ${dim("$")} ${cliCmd} login`);
+  }
   console.log(`    ${dim("$")} ${cliCmd} deploy my-page.html`);
   console.log();
 }

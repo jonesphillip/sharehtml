@@ -6,7 +6,7 @@
   "assets": {
     "not_found_handling": "none",
     "binding": "ASSETS",
-    "run_worker_first": ["/d/*", "/api/*", "/tokens/*", "/tokens", "/"],
+    "run_worker_first": ["/d/*", "/api/*", "/"],
   },
   "r2_buckets": [
     {

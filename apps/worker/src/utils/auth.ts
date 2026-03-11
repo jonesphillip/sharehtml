@@ -1,8 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import type { Env, AppBindings } from "../types.js";
-import { sha256 } from "./crypto.js";
-import { getRegistry } from "./registry.js";
 
 export interface AuthUser {
   id: string;
@@ -14,41 +12,6 @@ interface AccessJWTPayload extends JWTPayload {
   sub?: string;
 }
 
-// Bearer token auth for CLI API routes — resolves personal token to user email
-export const apiAuth = createMiddleware<AppBindings>(async (c, next) => {
-  const auth = c.req.header("Authorization");
-  if (!auth?.startsWith("Bearer ")) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-  const token = auth.slice(7);
-
-  // Dev mode fallback: accept legacy API_KEY
-  if (c.env.AUTH_MODE !== "access") {
-    if (c.env.API_KEY && token === c.env.API_KEY) {
-      c.set("apiUser", "dev@localhost");
-      await next();
-      return;
-    }
-  }
-
-  // Look up personal token
-  const tokenHash = await sha256(token);
-  const registry = getRegistry(c.env);
-  const result = await registry.getTokenUser(tokenHash);
-
-  if (!result) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-
-  if (result.expired) {
-    return c.json({ error: "token_expired" }, 401);
-  }
-
-  c.set("apiUser", result.user_email as string);
-  await next();
-});
-
-// JWKS cache
 let jwksCache: ReturnType<typeof createRemoteJWKSet> | null = null;
 
 function getJWKS(teamName: string) {
@@ -58,6 +21,10 @@ function getJWKS(teamName: string) {
     );
   }
   return jwksCache;
+}
+
+function getAccessJWTFromRequest(request: Request): string | null {
+  return request.headers.get("CF-Access-JWT-Assertion") || request.headers.get("cf-access-token");
 }
 
 async function verifyAccessJWT(jwt: string, env: Env): Promise<AuthUser | null> {
@@ -74,7 +41,6 @@ async function verifyAccessJWT(jwt: string, env: Env): Promise<AuthUser | null> 
     });
 
     const accessPayload = payload as AccessJWTPayload;
-
     if (!accessPayload.sub || !accessPayload.email) {
       console.error("JWT missing sub or email claim");
       return null;
@@ -98,10 +64,26 @@ export async function getAuthenticatedUser(request: Request, env: Env): Promise<
     return { id: "dev", email: "dev@localhost" };
   }
 
-  const jwt = request.headers.get("CF-Access-JWT-Assertion");
+  const jwt = getAccessJWTFromRequest(request);
   if (!jwt) {
     return null;
   }
 
   return verifyAccessJWT(jwt, env);
 }
+
+export const apiAuth = createMiddleware<AppBindings>(async (c, next) => {
+  if (c.env.AUTH_MODE !== "access") {
+    c.set("apiUser", "dev@localhost");
+    await next();
+    return;
+  }
+
+  const user = await getAuthenticatedUser(c.req.raw, c.env);
+  if (!user) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  c.set("apiUser", user.email);
+  await next();
+});

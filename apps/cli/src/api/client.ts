@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
+import { getAuthHeaders } from "../auth/access.js";
 import { getConfig, isConfigured } from "../config/store.js";
 import {
   isMarkdownFile,
@@ -24,11 +25,18 @@ interface DocumentMeta {
   created_at: string;
 }
 
-function getClient() {
+interface AuthContext {
+  canLogin: boolean;
+  headers: Record<string, string>;
+}
+
+interface RequestOptions extends RequestInit {
+  path: string;
+}
+
+function getClient(): { workerUrl: string } {
   if (!isConfigured()) {
-    throw new Error(
-      "Not configured. Run: sharehtml config set-url <url> && sharehtml config set-key <key>",
-    );
+    throw new Error("Not configured. Run: sharehtml config set-url <url>");
   }
   return getConfig();
 }
@@ -54,20 +62,44 @@ async function prepareUpload(
   return { blob, filename };
 }
 
-async function checkResponse(resp: Response, action: string) {
-  if (resp.ok) return;
-  if (resp.status === 401) {
-    const body = await resp.text().catch(() => "");
-    if (body.includes("token_expired")) {
-      const { workerUrl } = getConfig();
-      throw new Error(
-        `API token expired. Generate a new one at ${workerUrl}/tokens and run: sharehtml config set-key <token>`,
-      );
-    }
-    throw new Error(
-      "Invalid API token. Generate one at /tokens and run: sharehtml config set-key <token>",
-    );
+function getLoginErrorMessage(canLogin: boolean): string {
+  if (canLogin) {
+    return "Authentication required. Run: sharehtml login";
   }
+  return "Authentication required. Install cloudflared and run: sharehtml login";
+}
+
+async function checkResponse(
+  resp: Response,
+  action: string,
+  authContext: AuthContext,
+): Promise<void> {
+  const location = resp.headers.get("location") || "";
+  if (resp.status >= 300 && resp.status < 400) {
+    if (location.includes("cloudflareaccess.com") || location.includes("/cdn-cgi/access/login")) {
+      throw new Error(getLoginErrorMessage(authContext.canLogin));
+    }
+  }
+
+  if (resp.ok) return;
+
+  if (resp.status === 401 || resp.status === 403) {
+    const body = await resp.text().catch(() => "");
+    const contentType = resp.headers.get("content-type") || "";
+    const lowerBody = body.toLowerCase();
+
+    if (
+      contentType.includes("text/html") ||
+      lowerBody.includes("cloudflareaccess.com") ||
+      lowerBody.includes("cf-access") ||
+      lowerBody.includes("unauthorized")
+    ) {
+      throw new Error(getLoginErrorMessage(authContext.canLogin));
+    }
+
+    throw new Error(`${action} failed (${resp.status}): ${body || "Authentication required"}`);
+  }
+
   const body = await resp.text();
   throw new Error(`${action} failed (${resp.status}): ${body}`);
 }
@@ -81,37 +113,44 @@ async function parseJson<T>(resp: Response, action: string): Promise<T> {
   }
 }
 
+async function requestWithAccess(
+  action: string,
+  options: RequestOptions,
+): Promise<Response> {
+  const { workerUrl } = getClient();
+  const auth = await getAuthHeaders(workerUrl);
+  const resp = await fetch(`${workerUrl}${options.path}`, {
+    ...options,
+    headers: auth.headers,
+    redirect: "manual",
+  });
+
+  await checkResponse(resp, action, auth);
+  return resp;
+}
+
 export async function deployDocument(
   filePath: string,
   title?: string,
 ): Promise<DeployResult> {
-  const { workerUrl, apiKey } = getClient();
   const { blob, filename } = await prepareUpload(filePath, title);
 
   const formData = new FormData();
   formData.append("file", blob, filename);
   if (title) formData.append("title", title);
 
-  const resp = await fetch(`${workerUrl}/api/documents`, {
+  const resp = await requestWithAccess("Upload", {
+    path: "/api/documents",
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
     body: formData,
   });
-
-  await checkResponse(resp, "Upload");
   return parseJson<DeployResult>(resp, "Upload");
 }
 
 export async function findDocumentByFilename(filename: string): Promise<DocumentMeta | null> {
-  const { workerUrl, apiKey } = getClient();
-
-  const resp = await fetch(
-    `${workerUrl}/api/documents/by-filename?filename=${encodeURIComponent(filename)}`,
-    { headers: { Authorization: `Bearer ${apiKey}` } },
-  );
-
-  await checkResponse(resp, "Lookup");
-
+  const resp = await requestWithAccess("Lookup", {
+    path: `/api/documents/by-filename?filename=${encodeURIComponent(filename)}`,
+  });
   const data = await parseJson<{ document: DocumentMeta | null }>(resp, "Lookup");
   return data.document;
 }
@@ -121,54 +160,38 @@ export async function updateDocument(
   filePath: string,
   title?: string,
 ): Promise<DeployResult> {
-  const { workerUrl, apiKey } = getClient();
   const { blob, filename } = await prepareUpload(filePath, title);
 
   const formData = new FormData();
   formData.append("file", blob, filename);
   if (title) formData.append("title", title);
 
-  const resp = await fetch(`${workerUrl}/api/documents/${id}`, {
+  const resp = await requestWithAccess("Update", {
+    path: `/api/documents/${id}`,
     method: "PUT",
-    headers: { Authorization: `Bearer ${apiKey}` },
     body: formData,
   });
-
-  await checkResponse(resp, "Update");
   return parseJson<DeployResult>(resp, "Update");
 }
 
 export async function listDocuments(): Promise<{ documents: DocumentMeta[] }> {
-  const { workerUrl, apiKey } = getClient();
-
-  const resp = await fetch(`${workerUrl}/api/documents`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
+  const resp = await requestWithAccess("List", {
+    path: "/api/documents",
   });
-
-  await checkResponse(resp, "List");
-
   return parseJson<{ documents: DocumentMeta[] }>(resp, "List");
 }
 
 export async function deleteDocument(id: string): Promise<void> {
-  const { workerUrl, apiKey } = getClient();
-
-  const resp = await fetch(`${workerUrl}/api/documents/${id}`, {
+  await requestWithAccess("Delete", {
+    path: `/api/documents/${id}`,
     method: "DELETE",
-    headers: { Authorization: `Bearer ${apiKey}` },
   });
-
-  await checkResponse(resp, "Delete");
 }
 
 export async function downloadDocument(id: string): Promise<{ filename: string; content: Uint8Array }> {
-  const { workerUrl, apiKey } = getClient();
-
-  const resp = await fetch(`${workerUrl}/api/documents/${id}/raw`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
+  const resp = await requestWithAccess("Download", {
+    path: `/api/documents/${id}/raw`,
   });
-
-  await checkResponse(resp, "Download");
 
   const disposition = resp.headers.get("Content-Disposition") || "";
   const filenameMatch = disposition.match(/filename="(.+)"/);
