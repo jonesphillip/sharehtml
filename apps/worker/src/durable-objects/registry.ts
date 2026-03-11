@@ -44,6 +44,7 @@ export class RegistryDO extends DurableObject<Env> {
         filename TEXT NOT NULL,
         size INTEGER NOT NULL,
         owner_email TEXT NOT NULL,
+        is_shared INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `);
@@ -55,6 +56,16 @@ export class RegistryDO extends DurableObject<Env> {
         PRIMARY KEY (user_email, doc_id)
       )
     `);
+    this.ensureDocumentSharingColumn();
+  }
+
+  private ensureDocumentSharingColumn() {
+    const columns = this.sql.exec("PRAGMA table_info(documents)").toArray() as Array<{ name: string }>;
+    const hasSharingColumn = columns.some((column) => column.name === "is_shared");
+    if (hasSharingColumn) return;
+
+    // Existing deployments treated every document as link-shareable.
+    this.sql.exec("ALTER TABLE documents ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 1");
   }
 
   private pickColor(): string {
@@ -96,14 +107,16 @@ export class RegistryDO extends DurableObject<Env> {
     filename: string;
     size: number;
     owner_email: string;
+    is_shared: number;
   }) {
     this.sql.exec(
-      "INSERT INTO documents (id, title, filename, size, owner_email) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO documents (id, title, filename, size, owner_email, is_shared) VALUES (?, ?, ?, ?, ?, ?)",
       doc.id,
       doc.title,
       doc.filename,
       doc.size,
       doc.owner_email,
+      doc.is_shared,
     );
   }
 
@@ -141,6 +154,14 @@ export class RegistryDO extends DurableObject<Env> {
       updates.title,
       updates.filename,
       updates.size,
+      id,
+    );
+  }
+
+  async setDocumentShared(id: string, isShared: boolean) {
+    this.sql.exec(
+      "UPDATE documents SET is_shared = ? WHERE id = ?",
+      isShared ? 1 : 0,
       id,
     );
   }

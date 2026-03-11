@@ -8,6 +8,8 @@ import {
   getDocumentUrl,
   updateDocument,
 } from "../api/client.js";
+import { deploymentRequiresLogin } from "../auth/capabilities.js";
+import { updateDocumentSharing } from "./share-utils.js";
 import { isMarkdownFile, markdownFilenameToHtml } from "../utils/markdown.js";
 
 function confirm(question: string): Promise<boolean> {
@@ -25,8 +27,15 @@ export const deployCmd = new Command("deploy")
   .argument("<file>", "Path to HTML or Markdown file")
   .option("-t, --title <title>", "Document title (defaults to filename)")
   .option("-u, --update", "Update existing document without prompting")
-  .action(async (file: string, opts: { title?: string; update?: boolean }) => {
+  .option("--share", "Make the document shareable after deploy")
+  .option("--private", "Keep the document private after deploy")
+  .action(async (file: string, opts: { title?: string; update?: boolean; share?: boolean; private?: boolean }) => {
     const filePath = resolve(file);
+
+    if (opts.share && opts.private) {
+      console.error("Error: choose either --share or --private, not both");
+      process.exit(1);
+    }
 
     try {
       const stats = await stat(filePath);
@@ -40,6 +49,11 @@ export const deployCmd = new Command("deploy")
     }
 
     try {
+      const supportsPrivateDocuments = await deploymentRequiresLogin();
+      if (opts.private && !supportsPrivateDocuments) {
+        throw new Error("Private documents require Cloudflare Access on this deployment.");
+      }
+
       const filename = basename(filePath);
       const lookupFilename = isMarkdownFile(filename)
         ? markdownFilenameToHtml(filename)
@@ -61,17 +75,32 @@ export const deployCmd = new Command("deploy")
 
         console.log(`Updating ${file}...`);
         const result = await updateDocument(existing.id, filePath, opts.title);
+        let isShared = result.isShared;
+        if ((opts.share || opts.private) && supportsPrivateDocuments) {
+          const updated = await updateDocumentSharing(existing.id, Boolean(opts.share));
+          isShared = updated.isShared;
+        }
         console.log(`\nUpdated! ${result.url}`);
         console.log(`  id:    ${result.id}`);
         console.log(`  title: ${result.title}`);
         console.log(`  size:  ${(result.size / 1024).toFixed(1)}KB`);
+        console.log(`  share: ${isShared ? "shareable" : "private"}`);
       } else {
         console.log(`Deploying ${file}...`);
         const result = await deployDocument(filePath, opts.title);
+        let isShared = result.isShared;
+        if ((opts.share || opts.private) && supportsPrivateDocuments) {
+          const updated = await updateDocumentSharing(result.id, Boolean(opts.share));
+          isShared = updated.isShared;
+        }
         console.log(`\nDeployed! ${result.url}`);
         console.log(`  id:    ${result.id}`);
         console.log(`  title: ${result.title}`);
         console.log(`  size:  ${(result.size / 1024).toFixed(1)}KB`);
+        console.log(`  share: ${isShared ? "shareable" : "private"}`);
+        if (!opts.share && !opts.private && !isShared) {
+          console.log(`  next:  run 'sharehtml share ${lookupFilename}' to make it shareable`);
+        }
       }
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);

@@ -23,7 +23,7 @@ app.get("/", async (c) => {
 
   const [documents, recentViews] = await Promise.all([
     registry.listDocuments(email),
-    registry.getRecentViews(email),
+    registry.getRecentViews(email, 3),
   ]);
 
   const url = new URL(c.req.url);

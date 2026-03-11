@@ -8,10 +8,47 @@ interface ShellParams {
   title: string;
   ownerEmail: string;
   email: string;
+  authMode: "access" | "none";
+  isShared: boolean;
+  canManageSharing: boolean;
   assets: AssetUrls;
 }
 
-export function ShellView({ docId, title, ownerEmail, email, assets }: ShellParams): HtmlEscapedString {
+function getShareStatusText(authMode: "access" | "none", isShared: boolean): string {
+  if (authMode !== "access") {
+    return "anyone with the link can view and comment";
+  }
+
+  if (isShared) {
+    return "anyone with the link who is allowed by Cloudflare Access can view and comment";
+  }
+
+  return "only you can open this document";
+}
+
+function getShareNoteText(
+  authMode: "access" | "none",
+  isShared: boolean,
+  canManageSharing: boolean,
+): string {
+  if (authMode !== "access") {
+    return "Cloudflare Access is required to turn link sharing off.";
+  }
+
+  if (!canManageSharing) {
+    return "Only the document owner can change sharing.";
+  }
+
+  if (isShared) {
+    return "Turn sharing off to make this document private again.";
+  }
+
+  return "Turn sharing on to let anyone with the link open it.";
+}
+
+export function ShellView(
+  { docId, title, ownerEmail, email, authMode, isShared, canManageSharing, assets }: ShellParams,
+): HtmlEscapedString {
   return (
     <html lang="en">
       <head>
@@ -100,8 +137,8 @@ export function ShellView({ docId, title, ownerEmail, email, assets }: ShellPara
         <div class="modal-backdrop" id="share-modal" style="display:none">
           <div class="modal-content">
             <div class="modal-title">share this document</div>
-            <div class="modal-email" style="margin-bottom:16px">
-              anyone with the link can view and comment
+            <div class="modal-email" id="share-status-text" style="margin-bottom:16px">
+              {getShareStatusText(authMode, isShared)}
             </div>
             <div class="share-link-row">
               <input class="share-link-input" id="share-link-input" type="text" readonly />
@@ -109,10 +146,31 @@ export function ShellView({ docId, title, ownerEmail, email, assets }: ShellPara
                 copy
               </button>
             </div>
+            <div class="share-toggle-row">
+              <div class="share-toggle-copy">
+                <div class="share-toggle-label">share by link</div>
+                <div class="share-toggle-note" id="share-note">
+                  {getShareNoteText(authMode, isShared, canManageSharing)}
+                </div>
+              </div>
+              <label class="share-switch">
+                <input
+                  id="share-toggle"
+                  type="checkbox"
+                  checked={authMode !== "access" || isShared}
+                  disabled={!canManageSharing}
+                />
+                <span class="share-switch-ui"></span>
+              </label>
+            </div>
           </div>
         </div>
 
-        <script>{raw(`window.__COMMENT_CONFIG__ = ${JSON.stringify({ docId, email })}`)}</script>
+        <script>
+          {raw(
+            `window.__COMMENT_CONFIG__ = ${JSON.stringify({ docId, email, authMode, isShared, canManageSharing })}`,
+          )}
+        </script>
         <script type="module" src={assets.shellClientJs}></script>
       </body>
     </html>

@@ -2,10 +2,22 @@ import "./styles.css";
 
 import type { Anchor, Comment, Reaction, UserPresence } from "@sharehtml/shared";
 
-const config = (window as unknown as { __COMMENT_CONFIG__: { docId: string; email: string } })
+type AuthMode = "access" | "none";
+
+const config = (window as unknown as {
+  __COMMENT_CONFIG__: {
+    docId: string;
+    email: string;
+    authMode: AuthMode;
+    isShared: boolean;
+    canManageSharing: boolean;
+  };
+})
   .__COMMENT_CONFIG__;
 const DOC_ID = config.docId;
 const USER_EMAIL = config.email;
+const AUTH_MODE = config.authMode;
+const CAN_MANAGE_SHARING = config.canManageSharing;
 
 // State
 let ws: WebSocket | null = null;
@@ -27,6 +39,9 @@ let iframeScrollTop = 0;
 let iframeDriven = false;
 let suppressScrollSync = false;
 let sidebarSpacer: HTMLElement | null = null;
+let isShared = AUTH_MODE === "access" ? config.isShared : true;
+let shareMessageOverride: string | null = null;
+let isSavingShareState = false;
 
 // Elements
 const iframe = document.getElementById("doc-iframe") as HTMLIFrameElement;
@@ -44,6 +59,9 @@ const shareBtn = document.getElementById("share-btn")!;
 const shareModal = document.getElementById("share-modal")!;
 const shareLinkInput = document.getElementById("share-link-input") as HTMLInputElement;
 const shareCopyBtn = document.getElementById("share-copy-btn")!;
+const shareStatusText = document.getElementById("share-status-text")!;
+const shareToggle = document.getElementById("share-toggle") as HTMLInputElement;
+const shareNote = document.getElementById("share-note")!;
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 const SANDBOXED_IFRAME_ORIGIN = "null";
 
@@ -60,6 +78,86 @@ function closeSidebar() {
   localStorage.setItem(sidebarKey, "collapsed");
   sidebarBackdrop.classList.remove("visible");
   sendToIframe({ type: "sidebar:state", open: false });
+}
+
+function getShareStatusText(): string {
+  if (AUTH_MODE !== "access") {
+    return "anyone with the link can view and comment";
+  }
+
+  if (isShared) {
+    return "anyone with the link who is allowed by Cloudflare Access can view and comment";
+  }
+
+  return "only you can open this document";
+}
+
+function getShareNoteText(): string {
+  if (shareMessageOverride) {
+    return shareMessageOverride;
+  }
+
+  if (AUTH_MODE !== "access") {
+    return "Cloudflare Access is required to turn link sharing off.";
+  }
+
+  if (!CAN_MANAGE_SHARING) {
+    return "Only the document owner can change sharing.";
+  }
+
+  if (isShared) {
+    return "Turn sharing off to make this document private again.";
+  }
+
+  return "Turn sharing on to let anyone with the link open it.";
+}
+
+function renderShareModal() {
+  shareLinkInput.value = location.href;
+  shareStatusText.textContent = getShareStatusText();
+  shareNote.textContent = getShareNoteText();
+  shareCopyBtn.textContent = "copy";
+  shareToggle.checked = AUTH_MODE !== "access" || isShared;
+  shareToggle.disabled = isSavingShareState || !CAN_MANAGE_SHARING;
+  shareCopyBtn.disabled = isSavingShareState;
+}
+
+async function updateSharing(nextShared: boolean): Promise<boolean> {
+  if (!CAN_MANAGE_SHARING || AUTH_MODE !== "access" || nextShared === isShared) {
+    renderShareModal();
+    return true;
+  }
+
+  isSavingShareState = true;
+  shareMessageOverride = "saving...";
+  renderShareModal();
+
+  try {
+    const response = await fetch(`/api/documents/${DOC_ID}/share`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isShared: nextShared }),
+    });
+
+    if (!response.ok) {
+      shareMessageOverride = "could not update sharing. try again.";
+      isSavingShareState = false;
+      renderShareModal();
+      return false;
+    }
+
+    const result = await response.json() as { isShared: boolean };
+    isShared = result.isShared;
+    shareMessageOverride = null;
+    isSavingShareState = false;
+    renderShareModal();
+    return true;
+  } catch {
+    shareMessageOverride = "could not update sharing. try again.";
+    isSavingShareState = false;
+    renderShareModal();
+    return false;
+  }
 }
 
 // Init
@@ -124,7 +222,8 @@ function setupEventListeners() {
 
   // Share button
   shareBtn.addEventListener("click", () => {
-    shareLinkInput.value = location.href;
+    shareMessageOverride = null;
+    renderShareModal();
     shareModal.style.display = "flex";
     shareLinkInput.select();
   });
@@ -135,6 +234,12 @@ function setupEventListeners() {
         shareCopyBtn.textContent = "copy";
       }, 1500);
     });
+  });
+  shareToggle.addEventListener("change", async () => {
+    const saved = await updateSharing(shareToggle.checked);
+    if (!saved) {
+      shareToggle.checked = isShared;
+    }
   });
   shareModal.addEventListener("click", (e) => {
     if (e.target === shareModal) shareModal.style.display = "none";

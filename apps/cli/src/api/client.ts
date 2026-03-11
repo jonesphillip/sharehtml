@@ -14,6 +14,7 @@ interface DeployResult {
   title: string;
   filename: string;
   size: number;
+  isShared: boolean;
 }
 
 interface DocumentMeta {
@@ -22,6 +23,7 @@ interface DocumentMeta {
   filename: string;
   size: number;
   owner_email: string;
+  is_shared?: number;
   created_at: string;
 }
 
@@ -186,6 +188,17 @@ export async function deleteDocument(id: string): Promise<void> {
     path: `/api/documents/${id}`,
     method: "DELETE",
   });
+}
+
+export async function setDocumentSharing(id: string, isShared: boolean): Promise<boolean> {
+  const resp = await requestWithAccess("Update sharing", {
+    path: `/api/documents/${id}/share`,
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ isShared }),
+  });
+  const data = await parseJson<{ ok: boolean; isShared: boolean }>(resp, "Update sharing");
+  return data.isShared;
 }
 
 export async function downloadDocument(id: string): Promise<{ filename: string; content: Uint8Array }> {

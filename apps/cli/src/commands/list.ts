@@ -16,7 +16,8 @@ export const listCmd = new Command("list")
       console.log(`${documents.length} document(s):\n`);
       for (const doc of documents) {
         const size = (doc.size / 1024).toFixed(1);
-        console.log(`  ${doc.id}  ${doc.title}  (${size}KB)  ${doc.created_at}`);
+        const visibility = doc.is_shared ? "shareable" : "private";
+        console.log(`  ${doc.id}  ${doc.title}  (${size}KB)  ${visibility}  ${doc.created_at}`);
       }
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);

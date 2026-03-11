@@ -53,6 +53,18 @@ function DocCard({ doc, subtitle }: { doc: Document; subtitle: string }) {
   );
 }
 
+function RecentDocCard({ doc }: { doc: Document }) {
+  const viewedAt = doc.last_viewed_at || doc.created_at;
+
+  return (
+    <a class="recent-card" href={`/d/${doc.id}`}>
+      <div class="recent-card-title">{doc.title}</div>
+      <div class="recent-card-filename">{doc.filename}</div>
+      <div class="recent-card-meta">viewed {relativeTime(viewedAt)}</div>
+    </a>
+  );
+}
+
 export function HomeView({
   email,
   workerUrl,
@@ -128,6 +140,55 @@ export function HomeView({
             display: flex;
             flex-direction: column;
             gap: 8px;
+          }
+          .recent-grid {
+            display: grid;
+            grid-auto-flow: column;
+            grid-auto-columns: minmax(180px, 1fr);
+            gap: 8px;
+            overflow-x: auto;
+            padding-bottom: 2px;
+            scrollbar-width: thin;
+          }
+          .recent-card {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 112px;
+            border: 1px solid #d4d4d4;
+            border-radius: 4px;
+            padding: 12px;
+            text-decoration: none;
+            color: inherit;
+            transition: border-color 120ms ease;
+            animation: fadeIn 150ms ease;
+          }
+          .recent-card:hover {
+            border-color: #000000;
+          }
+          .recent-card-title {
+            font-size: 14px;
+            font-weight: 500;
+            line-height: 1.35;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            margin-bottom: 10px;
+          }
+          .recent-card-filename {
+            font-size: 12px;
+            font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
+            color: #a3a3a3;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin-bottom: 14px;
+          }
+          .recent-card-meta {
+            font-size: 12px;
+            font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
+            color: #737373;
           }
           .doc-card {
             display: block;
@@ -218,21 +279,16 @@ export function HomeView({
         <div class="content">
           <div class="section">
             <div class="section-label">recently viewed</div>
-            <div class="doc-list">
+            <div class="recent-grid">
               {recentViews.length > 0 ? (
-                recentViews.map((d) => (
-                  <DocCard
-                    doc={d}
-                    subtitle={`viewed ${relativeTime(d.last_viewed_at || d.created_at)}`}
-                  />
-                ))
+                recentViews.map((d) => <RecentDocCard doc={d} />)
               ) : (
                 <div class="section-empty">no recently viewed documents</div>
               )}
             </div>
           </div>
           <div class="section">
-            <div class="section-label">documents</div>
+            <div class="section-label">my documents</div>
             <div class="doc-list">
               {documents.length > 0 ? (
                 documents.map((d) => <DocCard doc={d} subtitle={formatSize(d.size)} />)

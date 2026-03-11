@@ -37,13 +37,21 @@ api.post("/documents", async (c) => {
       filename,
       size: file.size,
       owner_email: ownerEmail,
+      is_shared: c.env.AUTH_MODE === "access" ? 0 : 1,
     }),
   ]);
 
   const url = new URL(c.req.url);
   const docUrl = `${url.origin}/d/${id}`;
 
-  return c.json({ id, url: docUrl, title: resolvedTitle, filename, size: file.size });
+  return c.json({
+    id,
+    url: docUrl,
+    title: resolvedTitle,
+    filename,
+    size: file.size,
+    isShared: c.env.AUTH_MODE === "access" ? false : true,
+  });
 });
 
 // Find document by filename (owner resolved from token)
@@ -145,7 +153,42 @@ api.put("/documents/:id", async (c) => {
   const url = new URL(c.req.url);
   const docUrl = `${url.origin}/d/${id}`;
 
-  return c.json({ id, url: docUrl, title: resolvedTitle, filename, size: file.size });
+  return c.json({
+    id,
+    url: docUrl,
+    title: resolvedTitle,
+    filename,
+    size: file.size,
+    isShared: Boolean(meta.is_shared),
+  });
+});
+
+api.put("/documents/:id/share", async (c) => {
+  const id = c.req.param("id");
+
+  if (c.env.AUTH_MODE !== "access") {
+    return c.json({ error: "Cloudflare Access is required for document sharing controls" }, 400);
+  }
+
+  const body = await c.req.json<{ isShared?: boolean }>();
+  if (typeof body.isShared !== "boolean") {
+    return c.json({ error: "isShared must be a boolean" }, 400);
+  }
+
+  const registry = getRegistry(c.env);
+  const meta = await registry.getDocument(id);
+
+  if (!meta) {
+    return c.json({ error: "not found" }, 404);
+  }
+
+  if (meta.owner_email !== c.get("apiUser")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+
+  await registry.setDocumentShared(id, body.isShared);
+
+  return c.json({ ok: true, isShared: body.isShared });
 });
 
 // Delete document

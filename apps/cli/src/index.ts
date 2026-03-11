@@ -7,6 +7,8 @@ import { deleteCmd } from "./commands/delete.js";
 import { pullCmd } from "./commands/pull.js";
 import { configCmd } from "./commands/config.js";
 import { loginCmd } from "./commands/login.js";
+import { shareCmd } from "./commands/share.js";
+import { unshareCmd } from "./commands/unshare.js";
 
 const program = new Command();
 
@@ -20,6 +22,8 @@ program.addCommand(listCmd);
 program.addCommand(openCmd);
 program.addCommand(deleteCmd);
 program.addCommand(pullCmd);
+program.addCommand(shareCmd);
+program.addCommand(unshareCmd);
 program.addCommand(configCmd);
 program.addCommand(loginCmd);
 
