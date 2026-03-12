@@ -1280,7 +1280,7 @@ function generateId() {
 }
 
 function relativeTime(dateStr: string) {
-  const date = new Date(dateStr + "Z");
+  const date = parseTimestamp(dateStr);
   const now = new Date();
   const diff = (now.getTime() - date.getTime()) / 1000;
   if (diff < 60) return "now";
@@ -1288,6 +1288,14 @@ function relativeTime(dateStr: string) {
   if (diff < 86400) return Math.floor(diff / 3600) + "h";
   if (diff < 604800) return Math.floor(diff / 86400) + "d";
   return date.toLocaleDateString();
+}
+
+function parseTimestamp(dateStr: string) {
+  if (dateStr.includes("T")) {
+    return new Date(dateStr);
+  }
+
+  return new Date(dateStr + "Z");
 }
 
 // Start
