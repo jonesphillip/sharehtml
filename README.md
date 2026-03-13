@@ -99,7 +99,10 @@ Browser ◄┘──► Durable Objects
 | `sharehtml deploy <file>` | Deploy an HTML, Markdown, or code file (creates or updates) |
 | `sharehtml list` | List your documents |
 | `sharehtml open <id>` | Open a document in the browser |
+| `sharehtml pull <id>` | Download a document locally |
 | `sharehtml delete <id>` | Delete a document |
+| `sharehtml share <document>` | Make a document shareable |
+| `sharehtml unshare <document>` | Make a document private |
 | `sharehtml login` | Log in through Cloudflare Access |
 | `sharehtml config set-url <url>` | Set the sharehtml URL |
 | `sharehtml config show` | Show current configuration |

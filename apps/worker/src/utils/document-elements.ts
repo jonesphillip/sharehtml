@@ -3,6 +3,22 @@ import { getElementSelector } from "./anchors.js";
 
 const IGNORED_CONTENT_REGEX =
   /<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1>/gi;
+const VOID_TAGS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
 
 interface ElementFrame {
   selector: string;
@@ -34,7 +50,6 @@ export async function collectAnnotatableElementsFromHtml(
 
       const tagName = element.tagName.toLowerCase();
       const selector = `${parent.selector} > ${tagName}:nth-child(${parent.childIndex})`;
-      stack.push({ selector, childIndex: 0 });
 
       if (tagName === "img" || tagName === "canvas") {
         const typedTag = tagName as "img" | "canvas";
@@ -52,6 +67,11 @@ export async function collectAnnotatableElementsFromHtml(
         });
       }
 
+      if (VOID_TAGS.has(tagName)) {
+        return;
+      }
+
+      stack.push({ selector, childIndex: 0 });
       element.onEndTag(() => {
         stack.pop();
       });
