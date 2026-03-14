@@ -1,8 +1,17 @@
 {
   "name": "sharehtml",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Bun CLI for deploying HTML documents to sharehtml for collaborative commenting",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jonesphillip/sharehtml.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/jonesphillip/sharehtml",
+  "bugs": {
+    "url": "https://github.com/jonesphillip/sharehtml/issues"
+  },
   "bin": {
     "sharehtml": "./dist/index.js"
   },
