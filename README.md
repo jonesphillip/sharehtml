@@ -31,6 +31,18 @@ pnpm run setup
 
 The interactive setup script walks you through everything: deploying the worker, installing the CLI, and configuring authentication. Cloudflare Access is optional — the setup script asks if you want authentication. Without it, anyone with a link can view and comment.
 
+To install the CLI directly:
+
+```bash
+# with Bun
+bun install -g sharehtml
+
+# or with npm (Bun still needs to be installed for the CLI runtime)
+npm install -g sharehtml
+```
+
+If your team already has a sharehtml worker deployed, this is probably all you need — install the CLI, run `sharehtml config set-url <your-team-url>`, then `sharehtml login`.
+
 If you enable Cloudflare Access, you'll need a [Cloudflare API token](https://dash.cloudflare.com/profile/api-tokens) with these permissions:
 - **Account > Access: Apps and Policies > Edit**
 - **Account > Access: Organization, Identity Providers, and Groups > Read**

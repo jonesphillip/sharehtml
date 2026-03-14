@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { loginWithAccess } from "../auth/access.js";
+import { printSetupHint } from "../config/help.js";
 import { getConfig, isConfigured } from "../config/store.js";
 
 export const loginCmd = new Command("login")
@@ -7,7 +8,9 @@ export const loginCmd = new Command("login")
   .action(async () => {
     try {
       if (!isConfigured()) {
-        throw new Error("Not configured. Run: sharehtml config set-url <url>");
+        console.error("Error: Not configured. Run: sharehtml config set-url <url>");
+        printSetupHint();
+        process.exit(1);
       }
 
       const { workerUrl } = getConfig();

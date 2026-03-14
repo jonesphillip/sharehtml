@@ -1,10 +1,16 @@
 {
-  "name": "@sharehtml/cli",
+  "name": "sharehtml",
   "version": "0.0.1",
-  "private": true,
+  "description": "Bun CLI for deploying HTML documents to sharehtml for collaborative commenting",
   "type": "module",
   "bin": {
     "sharehtml": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun",

@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { printSetupHint } from "../config/help.js";
 import { setConfig, getConfig } from "../config/store.js";
 
 export const configCmd = new Command("config").description("Configure the CLI");
@@ -17,5 +18,10 @@ configCmd
   .action(() => {
     const c = getConfig();
     console.log(`Worker URL: ${c.workerUrl || "(not set)"}`);
+    if (!c.workerUrl) {
+      printSetupHint();
+      return;
+    }
+
     console.log(`Login:      run 'sharehtml login' when Cloudflare Access is enabled`);
   });
