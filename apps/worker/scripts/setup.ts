@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
 const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
+const R2_PRICING_URL = "https://developers.cloudflare.com/r2/pricing/#free-tier";
 
 process.on("SIGINT", () => {
   process.stdout.write("\n");
@@ -62,9 +63,16 @@ function run(cmd: string, args: string[], opts?: { input?: string; cwd?: string 
       encoding: "utf-8",
       cwd: opts?.cwd,
       maxBuffer: 10 * 1024 * 1024,
-    }, (err, stdout) => {
-      if (err && !stdout) return reject(err);
-      resolve(stdout.trim());
+    }, (err, stdout, stderr) => {
+      const outputText = [stdout, stderr].filter(Boolean).join("\n").trim();
+      if (err) {
+        (err as any).stdout = stdout;
+        (err as any).stderr = stderr;
+        (err as any).outputText = outputText;
+        reject(err);
+        return;
+      }
+      resolve(outputText);
     });
     if (opts?.input) {
       child.stdin!.write(opts.input);
@@ -301,6 +309,69 @@ function multiSelect(title: string, options: SelectOption[]): Promise<SelectOpti
 function fail(message: string): never {
   console.error(`\n  ${message}`);
   process.exit(1);
+}
+
+function formatCommandError(error: any): string {
+  const outputText = error?.outputText?.toString?.().trim();
+  if (outputText) return outputText;
+
+  const stderr = error?.stderr?.toString?.().trim();
+  if (stderr) return stderr;
+
+  const stdout = error?.stdout?.toString?.().trim();
+  if (stdout) return stdout;
+
+  return error?.message || String(error);
+}
+
+function isMissingR2Error(message: string): boolean {
+  return (
+    message.includes("Please enable R2 through the Cloudflare Dashboard") ||
+    message.includes("[code: 10042]")
+  );
+}
+
+function isAccessNotEnabledError(message: string): boolean {
+  return message.includes("access.api.error.not_enabled");
+}
+
+function getR2SetupMessage(): string {
+  return (
+    "R2 is not enabled on this Cloudflare account.\n" +
+    "In the Cloudflare Dashboard, go to Storage & databases -> R2 object storage and activate R2, then run `pnpm run setup` again.\n" +
+    `R2 includes a free tier to get started: ${R2_PRICING_URL}`
+  );
+}
+
+function getAccessDashboardUrl(accountId: string): string {
+  return `https://dash.cloudflare.com/${accountId}/zero-trust/landing-page`;
+}
+
+async function retryAccessSetup(accountId: string): Promise<boolean> {
+  const accessDashboardUrl = getAccessDashboardUrl(accountId);
+  console.log();
+  console.log("  Cloudflare Access is not enabled on this account.");
+  console.log(
+    "  Open Zero Trust for this account, click \"Get started\", choose a team name, and complete the Zero Trust Free signup flow.",
+  );
+  console.log(`  ${dim(accessDashboardUrl)}`);
+  console.log();
+  if (await confirm(`Open ${cyan(accessDashboardUrl)}?`)) {
+    openUrl(accessDashboardUrl);
+  }
+  console.log();
+  return await confirm("Retry Access setup after enabling Access?");
+}
+
+async function loadAccessConfiguration(
+  cfToken: string,
+  accountId: string,
+): Promise<{ existingPolicies: AccessPolicy[]; existingApps: AccessApp[] }> {
+  const [existingPolicies, existingApps] = await Promise.all([
+    cfApi(cfToken, "GET", `/accounts/${accountId}/access/policies`),
+    cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps`),
+  ]);
+  return { existingPolicies, existingApps };
 }
 
 async function inspectExistingAccessState(
@@ -576,7 +647,7 @@ async function main() {
   try {
     whoamiOutput = await run("npx", ["wrangler", "whoami"]);
   } catch (e: any) {
-    whoamiOutput = e.stdout?.toString?.() ?? e.output?.[1]?.toString?.() ?? "";
+    whoamiOutput = formatCommandError(e);
   }
   const accountMatch = whoamiOutput.match(/[│|]\s+(.+?)\s+[│|]\s+([a-f0-9]{32})\s+[│|]/);
   if (accountMatch) wranglerAccount = { name: accountMatch[1], id: accountMatch[2] };
@@ -586,7 +657,10 @@ async function main() {
   if (!wranglerAccount) {
     s.stop();
     console.log();
-    fail("Could not detect a Cloudflare account. Run `npx wrangler login` and try again.");
+    fail(
+      "Could not detect a Cloudflare account in Wrangler.\n" +
+        "Run `npx wrangler login` to connect your account, then run `pnpm run setup` again.",
+    );
   }
 
   // Detect project config
@@ -608,15 +682,21 @@ async function main() {
   let hostname: string;
   try {
     await run("npx", ["vite", "build"]);
-    const output = await run("npx", ["wrangler", "deploy"]);
+    const output = await run("npx", ["wrangler", "deploy"], { input: "y\n" });
     const urlMatch = output.match(/https:\/\/[\w.-]+\.workers\.dev/);
-    if (!urlMatch) throw new Error("Could not parse worker URL from deploy output");
+    if (!urlMatch) {
+      throw new Error("Could not parse worker URL from deploy output.");
+    }
     workerUrl = urlMatch[0];
     hostname = new URL(workerUrl).hostname;
     s.stop(`Deployed ${cyan(workerUrl)}`);
   } catch (e: any) {
     s.stop();
-    fail(`Deploy failed: ${e.message}`);
+    const message = formatCommandError(e);
+    if (isMissingR2Error(message)) {
+      fail(getR2SetupMessage());
+    }
+    fail(`Deploy failed: ${message}`);
   }
 
   // Cloudflare Access
@@ -648,73 +728,82 @@ async function main() {
     }
 
     const accountId = wranglerAccount.id;
+    while (true) {
+      let existingPolicies: AccessPolicy[] = [];
+      let existingApps: AccessApp[] = [];
+      let browserApp: AccessApp;
+      let selectedPolicies: SelectedPolicyState;
 
-    s = spinner("Loading Access configuration...", true);
-    const [existingPolicies, existingApps] = await Promise.all([
-      cfApi(cfToken, "GET", `/accounts/${accountId}/access/policies`).catch(() => []),
-      cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps`).catch(() => []),
-    ]);
-    s.stop();
+      try {
+        s = spinner("Loading Access configuration...", true);
+        ({ existingPolicies, existingApps } = await loadAccessConfiguration(cfToken, accountId));
+        s.stop();
 
-    const accessState = await inspectExistingAccessState(
-      cfToken,
-      accountId,
-      hostname,
-      config.name,
-      existingApps,
-    );
-    const reusablePolicies = existingPolicies.filter(
-      (policy: AccessPolicy) => policy.reusable && policy.decision === "allow",
-    );
-    const selectedPolicies = await selectAccessPolicies(
-      accessState.rootApp,
-      accessState.rootPolicies,
-      reusablePolicies,
-      wranglerEmail,
-    );
+        const accessState = await inspectExistingAccessState(
+          cfToken,
+          accountId,
+          hostname,
+          config.name,
+          existingApps,
+        );
+        const reusablePolicies = existingPolicies.filter(
+          (policy: AccessPolicy) => policy.reusable && policy.decision === "allow",
+        );
+        selectedPolicies = await selectAccessPolicies(
+          accessState.rootApp,
+          accessState.rootPolicies,
+          reusablePolicies,
+          wranglerEmail,
+        );
 
-    s = spinner("Configuring Access...", true);
-    let browserApp: AccessApp;
-    try {
-      browserApp = await reconcileRootAccessApp(
-        cfToken,
-        accountId,
-        hostname,
-        config.name,
-        accessState.rootApp,
-        selectedPolicies,
-      );
-      s.stop(`Access configured for ${selectedPolicies.policyLabels.join(", ")}`);
-    } catch (e: any) {
-      s.stop();
-      fail(`Access configuration failed: ${e.message}`);
-    }
+        s = spinner("Configuring Access...", true);
+        browserApp = await reconcileRootAccessApp(
+          cfToken,
+          accountId,
+          hostname,
+          config.name,
+          accessState.rootApp,
+          selectedPolicies,
+        );
+        s.stop(`Access configured for ${selectedPolicies.policyLabels.join(", ")}`);
 
-    await migrateLegacyApiAccessApp(
-      cfToken,
-      accountId,
-      hostname,
-      config.name,
-      existingApps,
-      existingPolicies,
-    );
+        await migrateLegacyApiAccessApp(
+          cfToken,
+          accountId,
+          hostname,
+          config.name,
+          existingApps,
+          existingPolicies,
+        );
 
-    // Secrets
-    s = spinner("Setting secrets...", true);
-    try {
-      const org = await cfApi(cfToken, "GET", `/accounts/${accountId}/access/organizations`);
-      const accessTeam = org.auth_domain.replace(".cloudflareaccess.com", "");
-      const accessAud = browserApp.aud;
+        s = spinner("Setting secrets...", true);
+        const org = await cfApi(cfToken, "GET", `/accounts/${accountId}/access/organizations`);
+        const accessTeam = org.auth_domain.replace(".cloudflareaccess.com", "");
+        const accessAud = browserApp.aud;
 
-      await Promise.all([
-        run("npx", ["wrangler", "secret", "put", "AUTH_MODE"], { input: "access" }),
-        run("npx", ["wrangler", "secret", "put", "ACCESS_AUD"], { input: accessAud }),
-        run("npx", ["wrangler", "secret", "put", "ACCESS_TEAM"], { input: accessTeam }),
-      ]);
-      s.stop("Secrets set");
-    } catch (e: any) {
-      s.stop();
-      fail(`Failed to set secrets: ${e.message}`);
+        await Promise.all([
+          run("npx", ["wrangler", "secret", "put", "AUTH_MODE"], { input: "access" }),
+          run("npx", ["wrangler", "secret", "put", "ACCESS_AUD"], { input: accessAud }),
+          run("npx", ["wrangler", "secret", "put", "ACCESS_TEAM"], { input: accessTeam }),
+        ]);
+        s.stop("Secrets set");
+        break;
+      } catch (e: any) {
+        s.stop();
+        const message = e?.message || String(e);
+        if (isAccessNotEnabledError(message)) {
+          const shouldRetry = await retryAccessSetup(accountId);
+          if (shouldRetry) continue;
+          fail("Cloudflare Access setup cancelled.");
+        }
+        if (message.startsWith("Failed to remove legacy API-only Access app:")) {
+          fail(message);
+        }
+        if (message.startsWith("Migration cancelled.")) {
+          fail(message);
+        }
+        fail(`Access setup failed: ${message}`);
+      }
     }
 
   } else {

@@ -18,7 +18,7 @@ Deploy a local document, get a link where others can view it and collaborate wit
 
 - [Node.js](https://nodejs.org/) 18+ and [pnpm](https://pnpm.io/)
 - [Bun](https://bun.sh/) (for the CLI and setup script)
-- [Cloudflare account](https://dash.cloudflare.com/sign-up) (free plan works)
+- [Cloudflare account](https://dash.cloudflare.com/sign-up) with [R2 enabled](https://developers.cloudflare.com/r2/pricing/#free-tier) (free tier available)
 
 ## Quick Start
 
@@ -26,6 +26,7 @@ Deploy a local document, get a link where others can view it and collaborate wit
 git clone https://github.com/jonesphillip/sharehtml.git
 cd sharehtml
 pnpm install
+npx wrangler login
 pnpm run setup
 ```
 
