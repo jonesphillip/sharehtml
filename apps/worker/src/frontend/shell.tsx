@@ -100,7 +100,7 @@ export function ShellView(
             <iframe
               id="doc-iframe"
               src={`/d/${docId}/content`}
-              sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+              sandbox="allow-scripts allow-popups"
               allow="fullscreen"
               allowFullScreen
             ></iframe>

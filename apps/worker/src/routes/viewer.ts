@@ -95,7 +95,12 @@ viewer.get("/d/:id/content", async (c) => {
     html += script;
   }
 
-  return c.html(html);
+  return new Response(html, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": "sandbox allow-scripts allow-popups",
+    },
+  });
 });
 
 // WebSocket proxy to Document DO
