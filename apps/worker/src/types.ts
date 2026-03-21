@@ -17,6 +17,7 @@ export type RecentViewRow = {
   size: number;
   owner_email: string;
   created_at: string;
+  // is_shared omitted: the JOIN query doesn't select it, and views are read-only
   last_viewed_at: string;
 };
 

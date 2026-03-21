@@ -193,7 +193,7 @@ function getHomeSearchScript(pageSize: number, workerUrl: string, page: number):
         searchParams.set("page", String(page));
         searchParams.set("limit", String(pageSize));
 
-        const response = await fetch("${workerUrl}/api/documents?" + searchParams.toString(), {
+        const response = await fetch(${JSON.stringify(workerUrl)} + "/api/documents?" + searchParams.toString(), {
           headers: { Accept: "application/json" },
         });
         if (!response.ok) return;
@@ -255,14 +255,16 @@ function SetupBlock({ workerUrl, requiresLogin }: { workerUrl: string; requiresL
         <a href="https://github.com/jonesphillip/sharehtml">sharehtml CLI</a>.{" "}
         Requires <a href="https://bun.sh">Bun</a>.
       </p>
-      {raw(`<pre><span class="cmd-comment"># install the CLI</span>
-bun install -g sharehtml
-
-<span class="cmd-comment"># configure</span>
-sharehtml config set-url ${workerUrl}
-${requiresLogin ? "sharehtml login\n" : ""}
-<span class="cmd-comment"># deploy a file</span>
-sharehtml deploy example/coffee-report.html</pre>`)}
+      <pre>
+        {raw(`<span class="cmd-comment"># install the CLI</span>\n`)}
+        bun install -g sharehtml{"\n\n"}
+        {raw(`<span class="cmd-comment"># configure</span>\n`)}
+        sharehtml config set-url {workerUrl}{"\n"}
+        {requiresLogin ? "sharehtml login\n" : ""}
+        {"\n"}
+        {raw(`<span class="cmd-comment"># deploy a file</span>\n`)}
+        sharehtml deploy example/coffee-report.html
+      </pre>
     </div>
   );
 }

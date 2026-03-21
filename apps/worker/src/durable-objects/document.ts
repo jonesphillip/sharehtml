@@ -196,12 +196,9 @@ export class DocumentDO extends DurableObject<Env> {
     }
 
     if (url.pathname.endsWith("/migrate-anchors") && request.method === "POST") {
-      const body = await request.json<{
-        newHtml?: string;
-        oldText?: string;
-        newText?: string;
-      }>();
+      const body: unknown = await request.json();
       if (
+        !isRecord(body) ||
         typeof body.newHtml !== "string" ||
         typeof body.oldText !== "string" ||
         typeof body.newText !== "string"
