@@ -1,7 +1,5 @@
 import { Hono } from "hono";
-import { isRecord, parseDocumentSnapshot } from "../types.js";
-import type { AppBindings, DocumentSnapshot } from "../types.js";
-import { apiAuth } from "../utils/auth.js";
+import { isRecord, parseDocumentSnapshot, type AppBindings, type DocumentSnapshot } from "../types.js";
 import { nanoid } from "../utils/ids.js";
 import { getRegistry } from "../utils/registry.js";
 import { extractDocumentTextFromHtml } from "../utils/document-text.js";
@@ -52,11 +50,9 @@ async function restoreDocumentSnapshot(
   }
 }
 
-api.use("/*", apiAuth);
-
 // Upload a document
 api.post("/documents", async (c) => {
-  const ownerEmail = c.get("apiUser");
+  const ownerEmail = c.get("authUser").email;
   const formData = await c.req.formData();
   const rawFile = formData.get("file");
   const file = rawFile instanceof File ? rawFile : null;
@@ -108,7 +104,7 @@ api.get("/documents/by-filename", async (c) => {
   if (!filename) {
     return c.json({ error: "filename required" }, 400);
   }
-  const owner = c.get("apiUser");
+  const owner = c.get("authUser").email;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocumentByFilename(filename, owner);
   return c.json({ document: doc });
@@ -116,7 +112,7 @@ api.get("/documents/by-filename", async (c) => {
 
 // Recently viewed documents (scoped to authenticated user)
 api.get("/documents/recent", async (c) => {
-  const email = c.get("apiUser");
+  const email = c.get("authUser").email;
   const registry = getRegistry(c.env);
   const documents = await registry.getRecentViews(email);
   return c.json({ documents });
@@ -124,7 +120,7 @@ api.get("/documents/recent", async (c) => {
 
 // List documents (scoped to authenticated user)
 api.get("/documents", async (c) => {
-  const owner = c.get("apiUser");
+  const owner = c.get("authUser").email;
   const registry = getRegistry(c.env);
   const query = (c.req.query("q") || "").trim();
   const limitQuery = Number.parseInt(c.req.query("limit") || "", 10);
@@ -154,7 +150,7 @@ api.get("/documents/:id/raw", async (c) => {
   const id = c.req.param("id");
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
-  if (!doc || doc.owner_email !== c.get("apiUser")) {
+  if (!doc || doc.owner_email !== c.get("authUser").email) {
     return c.json({ error: "not found" }, 404);
   }
 
@@ -176,7 +172,7 @@ api.get("/documents/:id", async (c) => {
   const id = c.req.param("id");
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
-  if (!doc || doc.owner_email !== c.get("apiUser")) {
+  if (!doc || doc.owner_email !== c.get("authUser").email) {
     return c.json({ error: "not found" }, 404);
   }
   return c.json({ document: doc });
@@ -206,7 +202,7 @@ api.put("/documents/:id", async (c) => {
     return c.json({ error: "not found" }, 404);
   }
 
-  if (meta.owner_email !== c.get("apiUser")) {
+  if (meta.owner_email !== c.get("authUser").email) {
     return c.json({ error: "forbidden" }, 403);
   }
 
@@ -296,7 +292,7 @@ api.put("/documents/:id/share", async (c) => {
     return c.json({ error: "not found" }, 404);
   }
 
-  if (meta.owner_email !== c.get("apiUser")) {
+  if (meta.owner_email !== c.get("authUser").email) {
     return c.json({ error: "forbidden" }, 403);
   }
 
@@ -316,7 +312,7 @@ api.delete("/documents/:id", async (c) => {
     return c.json({ error: "not found" }, 404);
   }
 
-  if (meta.owner_email !== c.get("apiUser")) {
+  if (meta.owner_email !== c.get("authUser").email) {
     return c.json({ error: "forbidden" }, 403);
   }
 

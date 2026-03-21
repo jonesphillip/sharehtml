@@ -1,11 +1,10 @@
 import { Hono } from "hono";
+import type { AppBindings, DocumentRow } from "../types.js";
 import { ShellView } from "../frontend/shell.js";
-import { getAuthenticatedUser } from "../utils/auth.js";
 import { getAssetUrls } from "../utils/assets.js";
 import { getRegistry } from "../utils/registry.js";
-import type { DocumentRow } from "../types.js";
 
-const viewer = new Hono<{ Bindings: Env }>();
+const viewer = new Hono<AppBindings>();
 
 function canViewDocument(
   doc: Pick<DocumentRow, "owner_email" | "is_shared">,
@@ -17,18 +16,12 @@ function canViewDocument(
 // Viewer shell
 viewer.get("/d/:id", async (c) => {
   const id = c.req.param("id");
+  const { email } = c.get("authUser");
 
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
 
-  if (!doc) {
-    return c.html("<h1>Document not found</h1>", 404);
-  }
-
-  const user = await getAuthenticatedUser(c.req.raw, c.env);
-  if (!user) return c.text("Unauthorized", 401);
-  const email = user.email;
-  if (!canViewDocument(doc, email)) {
+  if (!doc || !canViewDocument(doc, email)) {
     return c.text("Not found", 404);
   }
 
@@ -54,17 +47,12 @@ viewer.get("/d/:id", async (c) => {
 // Raw HTML content (served in iframe)
 viewer.get("/d/:id/content", async (c) => {
   const id = c.req.param("id");
+  const { email } = c.get("authUser");
 
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
 
-  if (!doc) {
-    return c.text("Not found", 404);
-  }
-
-  const user = await getAuthenticatedUser(c.req.raw, c.env);
-  if (!user) return c.text("Unauthorized", 401);
-  if (!canViewDocument(doc, user.email)) {
+  if (!doc || !canViewDocument(doc, email)) {
     return c.text("Not found", 404);
   }
 
@@ -106,23 +94,16 @@ viewer.get("/d/:id/content", async (c) => {
 // WebSocket proxy to Document DO
 viewer.get("/d/:id/ws", async (c) => {
   const id = c.req.param("id");
+  const { email } = c.get("authUser");
+
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
-  if (!doc) {
-    return c.text("Not found", 404);
-  }
-
-  // Verify identity and pass to DO so it can't be spoofed
-  const user = await getAuthenticatedUser(c.req.raw, c.env);
-  if (!user) {
-    return c.text("Unauthorized", 401);
-  }
-  if (!canViewDocument(doc, user.email)) {
+  if (!doc || !canViewDocument(doc, email)) {
     return c.text("Not found", 404);
   }
 
   const headers = new Headers(c.req.raw.headers);
-  headers.set("X-Verified-Email", user.email);
+  headers.set("X-Verified-Email", email);
 
   const docId = c.env.DOCUMENT_DO.idFromName(id);
   const docDo = c.env.DOCUMENT_DO.get(docId);

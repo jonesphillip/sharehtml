@@ -1,5 +1,7 @@
 import { createMiddleware } from "hono/factory";
+import { getCookie } from "hono/cookie";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import type { Context } from "hono";
 import type { AppBindings } from "../types.js";
 
 export interface AuthUser {
@@ -18,8 +20,13 @@ function getJWKS(teamName: string) {
   return jwksCache;
 }
 
-function getAccessJWTFromRequest(request: Request): string | null {
-  return request.headers.get("CF-Access-JWT-Assertion") || request.headers.get("cf-access-token");
+function getAccessJWT(c: Context): string | null {
+  return (
+    c.req.header("CF-Access-JWT-Assertion") ||
+    c.req.header("cf-access-token") ||
+    getCookie(c, "CF_Authorization") ||
+    null
+  );
 }
 
 async function verifyAccessJWT(jwt: string, env: Env): Promise<AuthUser | null> {
@@ -52,31 +59,23 @@ async function verifyAccessJWT(jwt: string, env: Env): Promise<AuthUser | null> 
   }
 }
 
-export async function getAuthenticatedUser(request: Request, env: Env): Promise<AuthUser | null> {
-  if (env.AUTH_MODE !== "access") {
-    return { id: "dev", email: "dev@localhost" };
-  }
-
-  const jwt = getAccessJWTFromRequest(request);
-  if (!jwt) {
-    return null;
-  }
-
-  return verifyAccessJWT(jwt, env);
-}
-
-export const apiAuth = createMiddleware<AppBindings>(async (c, next) => {
+export const authMiddleware = createMiddleware<AppBindings>(async (c, next) => {
   if (c.env.AUTH_MODE !== "access") {
-    c.set("apiUser", "dev@localhost");
+    c.set("authUser", { id: "dev", email: "dev@localhost" });
     await next();
     return;
   }
 
-  const user = await getAuthenticatedUser(c.req.raw, c.env);
-  if (!user) {
-    return c.json({ error: "Unauthorized" }, 401);
+  const jwt = getAccessJWT(c);
+  if (!jwt) {
+    return c.text("Unauthorized", 401);
   }
 
-  c.set("apiUser", user.email);
+  const user = await verifyAccessJWT(jwt, c.env);
+  if (!user) {
+    return c.text("Unauthorized", 401);
+  }
+
+  c.set("authUser", user);
   await next();
 });

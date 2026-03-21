@@ -78,6 +78,6 @@ export function parseDocumentSnapshot(value: unknown): DocumentSnapshot | null {
 export type AppBindings = {
   Bindings: Env;
   Variables: {
-    apiUser: string;
+    authUser: import("./utils/auth.js").AuthUser;
   };
 };
