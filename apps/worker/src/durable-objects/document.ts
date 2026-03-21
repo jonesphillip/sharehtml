@@ -464,8 +464,7 @@ export class DocumentDO extends DurableObject<Env> {
     const idsToDelete = new Set<string>([msg.id]);
     const queue = [msg.id];
 
-    while (queue.length > 0) {
-      const parentId = queue.shift()!;
+    for (let parentId = queue.pop(); parentId !== undefined; parentId = queue.pop()) {
       const childRows = this.sql
         .exec<{ id: string }>("SELECT id FROM comments WHERE parent_id = ?", parentId)
         .toArray();
@@ -477,12 +476,8 @@ export class DocumentDO extends DurableObject<Env> {
       }
     }
 
-    for (const id of idsToDelete) {
-      this.sql.exec(
-        "DELETE FROM comments WHERE id = ?",
-        id,
-      );
-    }
+    const placeholders = [...idsToDelete].map(() => "?").join(",");
+    this.sql.exec(`DELETE FROM comments WHERE id IN (${placeholders})`, ...idsToDelete);
 
     this.broadcast({ type: "comment:deleted", id: msg.id });
   }
@@ -571,13 +566,10 @@ export class DocumentDO extends DurableObject<Env> {
       );
       updatedComments++;
 
-      const updatedRows = this.sql.exec<CommentRow>("SELECT * FROM comments WHERE id = ?", comment.id).toArray();
-      if (updatedRows.length > 0) {
-        this.broadcast({
-          type: "comment:updated",
-          comment: this.rowToComment(updatedRows[0]),
-        });
-      }
+      this.broadcast({
+        type: "comment:updated",
+        comment: { ...comment, anchor: nextAnchor },
+      });
     }
 
     const reactionRows = this.sql.exec<ReactionRow>("SELECT * FROM reactions ORDER BY created_at ASC").toArray();
@@ -612,40 +604,42 @@ export class DocumentDO extends DurableObject<Env> {
   }
 
   private restoreSnapshot(snapshot: DocumentSnapshot): void {
-    this.sql.exec("DELETE FROM comments");
-    this.sql.exec("DELETE FROM reactions");
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM comments");
+      this.sql.exec("DELETE FROM reactions");
 
-    for (const comment of snapshot.comments) {
-      this.sql.exec(
-        `INSERT INTO comments
-          (id, author_email, author_name, author_color, content, anchor, parent_id, resolved, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        comment.id,
-        comment.author_email,
-        comment.author_name,
-        comment.author_color,
-        comment.content,
-        comment.anchor ? JSON.stringify(comment.anchor) : null,
-        comment.parent_id,
-        comment.resolved ? 1 : 0,
-        comment.created_at,
-        comment.updated_at,
-      );
-    }
+      for (const comment of snapshot.comments) {
+        this.sql.exec(
+          `INSERT INTO comments
+            (id, author_email, author_name, author_color, content, anchor, parent_id, resolved, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          comment.id,
+          comment.author_email,
+          comment.author_name,
+          comment.author_color,
+          comment.content,
+          comment.anchor ? JSON.stringify(comment.anchor) : null,
+          comment.parent_id,
+          comment.resolved ? 1 : 0,
+          comment.created_at,
+          comment.updated_at,
+        );
+      }
 
-    for (const reaction of snapshot.reactions) {
-      this.sql.exec(
-        `INSERT INTO reactions
-          (id, author_email, author_name, emoji, anchor, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        reaction.id,
-        reaction.author_email,
-        reaction.author_name,
-        reaction.emoji,
-        JSON.stringify(reaction.anchor),
-        reaction.created_at,
-      );
-    }
+      for (const reaction of snapshot.reactions) {
+        this.sql.exec(
+          `INSERT INTO reactions
+            (id, author_email, author_name, emoji, anchor, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          reaction.id,
+          reaction.author_email,
+          reaction.author_name,
+          reaction.emoji,
+          JSON.stringify(reaction.anchor),
+          reaction.created_at,
+        );
+      }
+    });
 
     this.broadcast({
       type: "comments:list",

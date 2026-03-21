@@ -9,15 +9,18 @@ export interface AuthUser {
   email: string;
 }
 
-let jwksCache: ReturnType<typeof createRemoteJWKSet> | null = null;
+let jwksCache: { teamName: string; jwks: ReturnType<typeof createRemoteJWKSet> } | null = null;
 
 function getJWKS(teamName: string) {
-  if (!jwksCache) {
-    jwksCache = createRemoteJWKSet(
-      new URL(`https://${teamName}.cloudflareaccess.com/cdn-cgi/access/certs`),
-    );
+  if (!jwksCache || jwksCache.teamName !== teamName) {
+    jwksCache = {
+      teamName,
+      jwks: createRemoteJWKSet(
+        new URL(`https://${teamName}.cloudflareaccess.com/cdn-cgi/access/certs`),
+      ),
+    };
   }
-  return jwksCache;
+  return jwksCache.jwks;
 }
 
 function getAccessJWT(c: Context): string | null {
