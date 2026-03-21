@@ -1,11 +1,22 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Env } from "../types.js";
+import { isRecord, parseDocumentSnapshot } from "../types.js";
+import type { CommentRow, ReactionRow, DocumentSnapshot } from "../types.js";
 import type { ClientMessage, ServerMessage } from "@sharehtml/shared";
 import type { Anchor, Comment, Reaction, UserPresence } from "@sharehtml/shared";
 import { getRegistry } from "../utils/registry.js";
 import { findAnchorRangeInText, getElementSelector, rebuildAnchor } from "../utils/anchors.js";
 import { collectAnnotatableElementsFromHtml, remapElementAnchor } from "../utils/document-elements.js";
 import { diffText, mapRangeThroughDiff } from "../utils/text-diff.js";
+
+const clientMessageTypes = new Set<string>([
+  "user:join", "user:set_name", "presence:update",
+  "comment:create", "comment:update", "comment:delete", "comment:resolve",
+  "reaction:add", "reaction:remove",
+]);
+
+function isClientMessage(value: unknown): value is ClientMessage {
+  return isRecord(value) && typeof value.type === "string" && clientMessageTypes.has(value.type);
+}
 
 interface WsAttachment {
   email: string;
@@ -14,9 +25,25 @@ interface WsAttachment {
   verifiedEmail?: string;
 }
 
-interface DocumentSnapshot {
-  comments: Comment[];
-  reactions: Reaction[];
+function parseAttachment(raw: unknown): WsAttachment | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.email !== "string" || typeof raw.name !== "string" || typeof raw.color !== "string") {
+    return null;
+  }
+  return {
+    email: raw.email,
+    name: raw.name,
+    color: raw.color,
+    verifiedEmail: typeof raw.verifiedEmail === "string" ? raw.verifiedEmail : undefined,
+  };
+}
+
+// At WebSocket accept time, only { verifiedEmail } is stored — the full
+// attachment (email, name, color) isn't set until handleUserJoin, so
+// parseAttachment would return null. This extracts just the verified email.
+function parseVerifiedEmail(raw: unknown): string | undefined {
+  if (!isRecord(raw)) return undefined;
+  return typeof raw.verifiedEmail === "string" ? raw.verifiedEmail : undefined;
 }
 
 export class DocumentDO extends DurableObject<Env> {
@@ -57,42 +84,34 @@ export class DocumentDO extends DurableObject<Env> {
     `);
   }
 
-  private rowToComment(row: Record<string, SqlStorageValue>): Comment {
+  private rowToComment(row: CommentRow): Comment {
     return {
-      id: row.id as string,
+      id: row.id,
       document_id: "",
-      author_email: row.author_email as string,
-      author_name: row.author_name as string,
-      author_color: row.author_color as string,
-      content: row.content as string,
-      anchor: row.anchor ? JSON.parse(row.anchor as string) : null,
-      parent_id: (row.parent_id as string) || null,
+      author_email: row.author_email,
+      author_name: row.author_name,
+      author_color: row.author_color,
+      content: row.content,
+      anchor: row.anchor ? JSON.parse(row.anchor) : null,
+      parent_id: row.parent_id || null,
       resolved: Boolean(row.resolved),
-      created_at: row.created_at as string,
-      updated_at: row.updated_at as string,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     };
   }
 
   private getComments(): Comment[] {
     return this.sql
-      .exec("SELECT * FROM comments ORDER BY created_at ASC")
+      .exec<CommentRow>("SELECT * FROM comments ORDER BY created_at ASC")
       .toArray()
-      .map((row: Record<string, SqlStorageValue>) => this.rowToComment(row));
+      .map((row) => this.rowToComment(row));
   }
 
   private getReactions(): Reaction[] {
     return this.sql
-      .exec("SELECT * FROM reactions ORDER BY created_at ASC")
+      .exec<ReactionRow>("SELECT * FROM reactions ORDER BY created_at ASC")
       .toArray()
-      .map((row: Record<string, SqlStorageValue>) => ({
-        id: row.id as string,
-        document_id: "",
-        author_email: row.author_email as string,
-        author_name: row.author_name as string,
-        emoji: row.emoji as string,
-        anchor: JSON.parse(row.anchor as string),
-        created_at: row.created_at as string,
-      }));
+      .map((row) => this.rowToReaction(row));
   }
 
   private getSnapshot(): DocumentSnapshot {
@@ -102,15 +121,15 @@ export class DocumentDO extends DurableObject<Env> {
     };
   }
 
-  private rowToReaction(row: Record<string, SqlStorageValue>): Reaction {
+  private rowToReaction(row: ReactionRow): Reaction {
     return {
-      id: row.id as string,
+      id: row.id,
       document_id: "",
-      author_email: row.author_email as string,
-      author_name: row.author_name as string,
-      emoji: row.emoji as string,
-      anchor: JSON.parse(row.anchor as string),
-      created_at: row.created_at as string,
+      author_email: row.author_email,
+      author_name: row.author_name,
+      emoji: row.emoji,
+      anchor: JSON.parse(row.anchor),
+      created_at: row.created_at,
     };
   }
 
@@ -131,8 +150,8 @@ export class DocumentDO extends DurableObject<Env> {
     this.presence.clear();
     for (const ws of this.ctx.getWebSockets()) {
       try {
-        const attachment = ws.deserializeAttachment() as WsAttachment | null;
-        if (attachment?.email) {
+        const attachment = parseAttachment(ws.deserializeAttachment());
+        if (attachment) {
           this.presence.set(attachment.email, {
             email: attachment.email,
             name: attachment.name,
@@ -147,7 +166,7 @@ export class DocumentDO extends DurableObject<Env> {
   }
 
   private getAttachment(ws: WebSocket): WsAttachment | null {
-    return ws.deserializeAttachment() as WsAttachment | null;
+    return parseAttachment(ws.deserializeAttachment());
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -163,7 +182,7 @@ export class DocumentDO extends DurableObject<Env> {
       this.ctx.acceptWebSocket(pair[1]);
       // Store verified email from Access JWT so handleUserJoin can enforce it
       if (verifiedEmail) {
-        pair[1].serializeAttachment({ verifiedEmail } as Partial<WsAttachment>);
+        pair[1].serializeAttachment({ verifiedEmail });
       }
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
@@ -198,7 +217,10 @@ export class DocumentDO extends DurableObject<Env> {
     }
 
     if (url.pathname.endsWith("/restore-snapshot") && request.method === "POST") {
-      const snapshot = await request.json<DocumentSnapshot>();
+      const snapshot = parseDocumentSnapshot(await request.json());
+      if (!snapshot) {
+        return Response.json({ error: "invalid snapshot" }, { status: 400 });
+      }
       this.restoreSnapshot(snapshot);
       return Response.json({ ok: true });
     }
@@ -206,54 +228,62 @@ export class DocumentDO extends DurableObject<Env> {
     return new Response("Not found", { status: 404 });
   }
 
+  private static readonly MAX_MESSAGE_SIZE = 64 * 1024;
+  private static readonly MAX_NAME_LENGTH = 100;
+  private static readonly MAX_COMMENT_LENGTH = 10_000;
+
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     if (typeof message !== "string") return;
+    if (message.length > DocumentDO.MAX_MESSAGE_SIZE) return;
 
-    let msg: ClientMessage & { type: string };
+    let parsed: unknown;
     try {
-      msg = JSON.parse(message);
+      parsed = JSON.parse(message);
     } catch {
       return;
     }
 
-    if (msg.type === "ping") {
+    if (isRecord(parsed) && parsed.type === "ping") {
       ws.send("pong");
       return;
     }
 
-    switch (msg.type) {
+    if (!isClientMessage(parsed)) return;
+
+    switch (parsed.type) {
       case "user:join":
-        return this.handleUserJoin(ws, msg);
+        return this.handleUserJoin(ws, parsed);
       case "user:set_name":
-        return this.handleUserSetName(ws, msg);
+        return this.handleUserSetName(ws, parsed);
       case "presence:update":
-        return this.handlePresenceUpdate(ws, msg);
+        return this.handlePresenceUpdate(ws, parsed);
       case "comment:create":
-        return this.handleCommentCreate(ws, msg);
+        return this.handleCommentCreate(ws, parsed);
       case "comment:update":
-        return this.handleCommentUpdate(ws, msg);
+        return this.handleCommentUpdate(ws, parsed);
       case "comment:delete":
-        return this.handleCommentDelete(ws, msg);
+        return this.handleCommentDelete(ws, parsed);
       case "comment:resolve":
-        return this.handleCommentResolve(ws, msg);
+        return this.handleCommentResolve(ws, parsed);
       case "reaction:add":
-        return this.handleReactionAdd(ws, msg);
+        return this.handleReactionAdd(ws, parsed);
       case "reaction:remove":
-        return this.handleReactionRemove(ws, msg);
+        return this.handleReactionRemove(ws, parsed);
     }
   }
 
   private async handleUserJoin(ws: WebSocket, msg: Extract<ClientMessage, { type: "user:join" }>) {
     // Use verified email from Access JWT if available, ignore client-claimed email
-    const existing = ws.deserializeAttachment() as Partial<WsAttachment> | null;
-    const email = existing?.verifiedEmail || msg.email;
+    const verifiedEmail = parseVerifiedEmail(ws.deserializeAttachment());
+    const email = verifiedEmail || msg.email;
+    const name = msg.name.slice(0, DocumentDO.MAX_NAME_LENGTH);
 
     const registry = getRegistry(this.env);
     const attachment: WsAttachment = {
       email,
-      name: msg.name,
+      name,
       color: "",
-      verifiedEmail: existing?.verifiedEmail,
+      verifiedEmail,
     };
 
     const user = await registry.getUser(email);
@@ -261,18 +291,19 @@ export class DocumentDO extends DurableObject<Env> {
       attachment.color = user.color;
       attachment.name = user.display_name;
     } else {
-      const created = await registry.setUser(email, msg.name);
+      const created = await registry.setUser(email, name);
       attachment.color = created.color;
     }
 
     ws.serializeAttachment(attachment);
 
-    this.presence.set(email, {
+    const userPresence: UserPresence = {
       email,
-      name: attachment.name || msg.name,
+      name: attachment.name || name,
       color: attachment.color,
       last_seen: Date.now(),
-    });
+    };
+    this.presence.set(email, userPresence);
 
     const comments = this.getComments();
     const reactions = this.getReactions();
@@ -298,7 +329,7 @@ export class DocumentDO extends DurableObject<Env> {
     this.broadcast(
       {
         type: "user:joined",
-        user: this.presence.get(email)!,
+        user: userPresence,
       },
       ws,
     );
@@ -311,22 +342,23 @@ export class DocumentDO extends DurableObject<Env> {
     const attachment = this.getAttachment(ws);
     if (!attachment) return;
 
+    const name = msg.name.slice(0, DocumentDO.MAX_NAME_LENGTH);
     const registry = getRegistry(this.env);
-    await registry.setUser(attachment.email, msg.name);
+    await registry.setUser(attachment.email, name);
 
-    attachment.name = msg.name;
+    attachment.name = name;
     ws.serializeAttachment(attachment);
 
     const pres = this.presence.get(attachment.email);
     if (pres) {
-      pres.name = msg.name;
+      pres.name = name;
       this.presence.set(attachment.email, pres);
     }
 
     this.broadcast({
       type: "user:name_set",
       email: attachment.email,
-      name: msg.name,
+      name,
     });
   }
 
@@ -360,6 +392,7 @@ export class DocumentDO extends DurableObject<Env> {
     const attachment = this.getAttachment(ws);
     if (!attachment) return;
 
+    const content = msg.content.slice(0, DocumentDO.MAX_COMMENT_LENGTH);
     const anchorJson = msg.anchor ? JSON.stringify(msg.anchor) : null;
     this.sql.exec(
       `INSERT INTO comments (id, author_email, author_name, author_color, content, anchor, parent_id)
@@ -368,7 +401,7 @@ export class DocumentDO extends DurableObject<Env> {
       attachment.email,
       attachment.name,
       attachment.color,
-      msg.content,
+      content,
       anchorJson,
       msg.parent_id,
     );
@@ -379,7 +412,7 @@ export class DocumentDO extends DurableObject<Env> {
       author_email: attachment.email,
       author_name: attachment.name,
       author_color: attachment.color,
-      content: msg.content,
+      content,
       anchor: msg.anchor,
       parent_id: msg.parent_id,
       resolved: false,
@@ -397,16 +430,17 @@ export class DocumentDO extends DurableObject<Env> {
     const attachment = this.getAttachment(ws);
     if (!attachment) return;
 
+    const content = msg.content.slice(0, DocumentDO.MAX_COMMENT_LENGTH);
     this.sql.exec(
       "UPDATE comments SET content = ?, updated_at = datetime('now') WHERE id = ? AND author_email = ?",
-      msg.content,
+      content,
       msg.id,
       attachment.email,
     );
 
-    const rows = this.sql.exec("SELECT * FROM comments WHERE id = ?", msg.id).toArray();
+    const rows = this.sql.exec<CommentRow>("SELECT * FROM comments WHERE id = ?", msg.id).toArray();
     if (rows.length > 0) {
-      const comment = this.rowToComment(rows[0] as Record<string, SqlStorageValue>);
+      const comment = this.rowToComment(rows[0]);
       this.broadcast({ type: "comment:updated", comment });
     }
   }
@@ -418,13 +452,13 @@ export class DocumentDO extends DurableObject<Env> {
     const attachment = this.getAttachment(ws);
     if (!attachment) return;
 
-    const rows = this.sql.exec(
+    const rows = this.sql.exec<{ id: string; author_email: string }>(
       "SELECT id, author_email FROM comments WHERE id = ?",
       msg.id,
     ).toArray();
     if (rows.length === 0) return;
 
-    const comment = rows[0] as { id: string; author_email: string };
+    const comment = rows[0];
     if (comment.author_email !== attachment.email) return;
 
     const idsToDelete = new Set<string>([msg.id]);
@@ -433,8 +467,8 @@ export class DocumentDO extends DurableObject<Env> {
     while (queue.length > 0) {
       const parentId = queue.shift()!;
       const childRows = this.sql
-        .exec("SELECT id FROM comments WHERE parent_id = ?", parentId)
-        .toArray() as Array<{ id: string }>;
+        .exec<{ id: string }>("SELECT id FROM comments WHERE parent_id = ?", parentId)
+        .toArray();
 
       for (const child of childRows) {
         if (idsToDelete.has(child.id)) continue;
@@ -507,9 +541,9 @@ export class DocumentDO extends DurableObject<Env> {
     const textDiff = diffText(oldText, newText);
     const nextElements = await collectAnnotatableElementsFromHtml(newHtml);
 
-    const commentRows = this.sql.exec("SELECT * FROM comments ORDER BY created_at ASC").toArray();
+    const commentRows = this.sql.exec<CommentRow>("SELECT * FROM comments ORDER BY created_at ASC").toArray();
     for (const row of commentRows) {
-      const comment = this.rowToComment(row as Record<string, SqlStorageValue>);
+      const comment = this.rowToComment(row);
       if (!comment.anchor) continue;
 
       const nextAnchor = this.remapAnchor(comment.anchor, oldText, newText, textDiff, nextElements);
@@ -537,18 +571,18 @@ export class DocumentDO extends DurableObject<Env> {
       );
       updatedComments++;
 
-      const updatedRows = this.sql.exec("SELECT * FROM comments WHERE id = ?", comment.id).toArray();
+      const updatedRows = this.sql.exec<CommentRow>("SELECT * FROM comments WHERE id = ?", comment.id).toArray();
       if (updatedRows.length > 0) {
         this.broadcast({
           type: "comment:updated",
-          comment: this.rowToComment(updatedRows[0] as Record<string, SqlStorageValue>),
+          comment: this.rowToComment(updatedRows[0]),
         });
       }
     }
 
-    const reactionRows = this.sql.exec("SELECT * FROM reactions ORDER BY created_at ASC").toArray();
+    const reactionRows = this.sql.exec<ReactionRow>("SELECT * FROM reactions ORDER BY created_at ASC").toArray();
     for (const row of reactionRows) {
-      const reaction = this.rowToReaction(row as Record<string, SqlStorageValue>);
+      const reaction = this.rowToReaction(row);
       const nextAnchor = this.remapAnchor(reaction.anchor, oldText, newText, textDiff, nextElements);
 
       if (nextAnchor === "resolve") {
@@ -663,17 +697,18 @@ export class DocumentDO extends DurableObject<Env> {
     const attachment = this.getAttachment(ws);
     if (!attachment) return;
 
-    this.sql.exec(
+    const result = this.sql.exec(
       "DELETE FROM reactions WHERE id = ? AND author_email = ?",
       msg.id,
       attachment.email,
     );
+    if (!result.rowsWritten) return;
     this.broadcast({ type: "reaction:removed", id: msg.id });
   }
 
   private handleDisconnect(ws: WebSocket) {
-    const attachment = ws.deserializeAttachment() as WsAttachment | null;
-    if (attachment?.email) {
+    const attachment = parseAttachment(ws.deserializeAttachment());
+    if (attachment) {
       this.presence.delete(attachment.email);
       this.broadcast({ type: "user:left", email: attachment.email });
     }

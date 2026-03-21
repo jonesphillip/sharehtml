@@ -1,20 +1,21 @@
 /** @jsxImportSource hono/jsx */
 import { raw } from "hono/utils/html";
-import type { HtmlEscapedString } from "hono/utils/html";
 import type { AssetUrls } from "../utils/assets.js";
+import type { AuthMode } from "../types.js";
+import { toHtml, escapeScriptContent, safeJsonForScript } from "./jsx.js";
 
 interface ShellParams {
   docId: string;
   title: string;
   ownerEmail: string;
   email: string;
-  authMode: "access" | "none";
+  authMode: AuthMode;
   isShared: boolean;
   canManageSharing: boolean;
   assets: AssetUrls;
 }
 
-function getShareStatusText(authMode: "access" | "none", isShared: boolean): string {
+function getShareStatusText(authMode: AuthMode, isShared: boolean): string {
   if (authMode !== "access") {
     return "anyone with the link can view and comment";
   }
@@ -27,7 +28,7 @@ function getShareStatusText(authMode: "access" | "none", isShared: boolean): str
 }
 
 function getShareNoteText(
-  authMode: "access" | "none",
+  authMode: AuthMode,
   isShared: boolean,
   canManageSharing: boolean,
 ): string {
@@ -48,8 +49,8 @@ function getShareNoteText(
 
 export function ShellView(
   { docId, title, ownerEmail, email, authMode, isShared, canManageSharing, assets }: ShellParams,
-): HtmlEscapedString {
-  return (
+) {
+  const jsx = (
     <html lang="en">
       <head>
         <meta charset="utf-8" />
@@ -58,9 +59,9 @@ export function ShellView(
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
         {assets.shellClientCss && <link rel="stylesheet" href={assets.shellClientCss} />}
         <script>
-          {raw(
+          {raw(escapeScriptContent(
             `if(localStorage.getItem('comment_sidebar_${docId}')==='collapsed'){document.documentElement.classList.add('sidebar-start-collapsed')}`,
-          )}
+          ))}
         </script>
         <style>
           {raw(`.sidebar-start-collapsed .sidebar{width:0;border-left:none;overflow:hidden}`)}
@@ -170,11 +171,12 @@ export function ShellView(
 
         <script>
           {raw(
-            `window.__COMMENT_CONFIG__ = ${JSON.stringify({ docId, email, authMode, isShared, canManageSharing })}`,
+            `window.__COMMENT_CONFIG__ = ${safeJsonForScript({ docId, email, authMode, isShared, canManageSharing })}`,
           )}
         </script>
         <script type="module" src={assets.shellClientJs}></script>
       </body>
     </html>
-  ) as unknown as HtmlEscapedString;
+  );
+  return toHtml(jsx);
 }

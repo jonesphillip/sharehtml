@@ -27,7 +27,7 @@ export async function getAssetUrls(assets: Fetcher): Promise<AssetUrls> {
   if (cachedUrls) return cachedUrls;
 
   const resp = await assets.fetch(new Request("https://assets.local/manifest.json"));
-  const manifest = (await resp.json()) as Record<string, ManifestEntry>;
+  const manifest = await resp.json<Record<string, ManifestEntry>>();
 
   const shellEntry = manifest["src/client/shell-client.ts"];
   const homeEntry = manifest["src/client/home-client.ts"];

@@ -1,17 +1,12 @@
 import { Hono } from "hono";
-import type { AppBindings } from "../types.js";
+import { isRecord, parseDocumentSnapshot } from "../types.js";
+import type { AppBindings, DocumentSnapshot } from "../types.js";
 import { apiAuth } from "../utils/auth.js";
 import { nanoid } from "../utils/ids.js";
 import { getRegistry } from "../utils/registry.js";
 import { extractDocumentTextFromHtml } from "../utils/document-text.js";
-import type { Comment, Reaction } from "@sharehtml/shared";
 
 const api = new Hono<AppBindings>();
-
-interface DocumentSnapshot {
-  comments: Comment[];
-  reactions: Reaction[];
-}
 
 async function migrateDocumentAnchors(
   documentDo: DurableObjectStub,
@@ -35,7 +30,11 @@ async function getDocumentSnapshot(documentDo: DurableObjectStub): Promise<Docum
   if (!response.ok) {
     throw new Error(`snapshot failed with status ${response.status}`);
   }
-  return response.json<DocumentSnapshot>();
+  const snapshot = parseDocumentSnapshot(await response.json());
+  if (!snapshot) {
+    throw new Error("invalid snapshot response from document DO");
+  }
+  return snapshot;
 }
 
 async function restoreDocumentSnapshot(
@@ -59,8 +58,10 @@ api.use("/*", apiAuth);
 api.post("/documents", async (c) => {
   const ownerEmail = c.get("apiUser");
   const formData = await c.req.formData();
-  const file = formData.get("file") as File | null;
-  const title = formData.get("title") as string | null;
+  const rawFile = formData.get("file");
+  const file = rawFile instanceof File ? rawFile : null;
+  const rawTitle = formData.get("title");
+  const title = typeof rawTitle === "string" ? rawTitle : null;
 
   if (!file) {
     return c.json({ error: "file is required" }, 400);
@@ -97,7 +98,7 @@ api.post("/documents", async (c) => {
     title: resolvedTitle,
     filename,
     size: file.size,
-    isShared: c.env.AUTH_MODE === "access" ? false : true,
+    isShared: c.env.AUTH_MODE !== "access",
   });
 });
 
@@ -185,8 +186,10 @@ api.get("/documents/:id", async (c) => {
 api.put("/documents/:id", async (c) => {
   const id = c.req.param("id");
   const formData = await c.req.formData();
-  const file = formData.get("file") as File | null;
-  const title = formData.get("title") as string | null;
+  const rawFile = formData.get("file");
+  const file = rawFile instanceof File ? rawFile : null;
+  const rawTitle = formData.get("title");
+  const title = typeof rawTitle === "string" ? rawTitle : null;
 
   if (!file) {
     return c.json({ error: "file is required" }, 400);
@@ -230,7 +233,7 @@ api.put("/documents/:id", async (c) => {
 
   await c.env.DOCUMENTS_BUCKET.put(tempKey, nextHtml, {
     httpMetadata: { contentType: "text/html" },
-    customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email as string },
+    customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email },
   });
 
   try {
@@ -241,7 +244,7 @@ api.put("/documents/:id", async (c) => {
 
     await c.env.DOCUMENTS_BUCKET.put(finalKey, nextHtml, {
       httpMetadata: { contentType: "text/html" },
-      customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email as string },
+      customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email },
     });
     await registry.updateDocument(id, { title: resolvedTitle, filename, size: file.size });
 
@@ -281,8 +284,8 @@ api.put("/documents/:id/share", async (c) => {
     return c.json({ error: "Cloudflare Access is required for document sharing controls" }, 400);
   }
 
-  const body = await c.req.json<{ isShared?: boolean }>();
-  if (typeof body.isShared !== "boolean") {
+  const body: unknown = await c.req.json();
+  if (!isRecord(body) || typeof body.isShared !== "boolean") {
     return c.json({ error: "isShared must be a boolean" }, 400);
   }
 

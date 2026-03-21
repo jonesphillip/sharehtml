@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import type { Env } from "./types.js";
 import { api } from "./routes/api.js";
 import { viewer } from "./routes/viewer.js";
 import { HomeView } from "./frontend/home.js";
@@ -39,8 +38,8 @@ app.get("/", async (c) => {
       assets,
       email,
       workerUrl,
-      documents: documentsPage.documents as any,
-      recentViews: recentViews as any,
+      documents: documentsPage.documents,
+      recentViews,
       query,
       page: documentsPage.page,
       pageSize,

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Env } from "../types.js";
+import type { DocumentRow, RecentViewRow, UserRow } from "../types.js";
 
 const USER_COLORS = [
   "#e11d48",
@@ -60,7 +60,7 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   private ensureDocumentSharingColumn() {
-    const columns = this.sql.exec("PRAGMA table_info(documents)").toArray() as Array<{ name: string }>;
+    const columns = this.sql.exec<{ name: string }>("PRAGMA table_info(documents)").toArray();
     const hasSharingColumn = columns.some((column) => column.name === "is_shared");
     if (hasSharingColumn) return;
 
@@ -72,20 +72,15 @@ export class RegistryDO extends DurableObject<Env> {
     return USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)];
   }
 
-  async getUser(
-    email: string,
-  ): Promise<{ email: string; display_name: string; color: string } | null> {
+  async getUser(email: string): Promise<UserRow | null> {
     const rows = this.sql
-      .exec("SELECT email, display_name, color FROM users WHERE email = ?", email)
+      .exec<UserRow>("SELECT email, display_name, color FROM users WHERE email = ?", email)
       .toArray();
     if (rows.length === 0) return null;
-    return rows[0] as { email: string; display_name: string; color: string };
+    return rows[0];
   }
 
-  async setUser(
-    email: string,
-    displayName: string,
-  ): Promise<{ email: string; display_name: string; color: string }> {
+  async setUser(email: string, displayName: string): Promise<UserRow> {
     const existing = await this.getUser(email);
     if (existing) {
       this.sql.exec("UPDATE users SET display_name = ? WHERE email = ?", displayName, email);
@@ -120,51 +115,52 @@ export class RegistryDO extends DurableObject<Env> {
     );
   }
 
-  async getDocument(id: string) {
-    const rows = this.sql.exec("SELECT * FROM documents WHERE id = ?", id).toArray();
+  async getDocument(id: string): Promise<DocumentRow | null> {
+    const rows = this.sql.exec<DocumentRow>("SELECT * FROM documents WHERE id = ?", id).toArray();
     return rows.length > 0 ? rows[0] : null;
   }
 
-  async listDocuments(ownerEmail?: string) {
+  async listDocuments(ownerEmail?: string): Promise<DocumentRow[]> {
     if (ownerEmail) {
       return this.sql
-        .exec(
+        .exec<DocumentRow>(
           "SELECT * FROM documents WHERE owner_email = ? ORDER BY created_at DESC LIMIT 500",
           ownerEmail,
         )
         .toArray();
     }
-    return this.sql.exec("SELECT * FROM documents ORDER BY created_at DESC LIMIT 500").toArray();
+    return this.sql.exec<DocumentRow>("SELECT * FROM documents ORDER BY created_at DESC LIMIT 500").toArray();
   }
 
   async listDocumentsPage(
     ownerEmail: string,
     options: { query?: string; limit: number; page: number },
-  ) {
+  ): Promise<{ documents: DocumentRow[]; totalCount: number; page: number }> {
     const searchQuery = options.query?.trim() || "";
     const params: Array<string | number> = [ownerEmail];
     let whereClause = "owner_email = ?";
 
     if (searchQuery) {
-      whereClause += " AND (title LIKE ? OR filename LIKE ?)";
-      const likeQuery = `%${searchQuery}%`;
+      whereClause += " AND (title LIKE ? ESCAPE '\\' OR filename LIKE ? ESCAPE '\\')";
+      const escaped = searchQuery.replace(/[%_\\]/g, "\\$&");
+      const likeQuery = `%${escaped}%`;
       params.push(likeQuery, likeQuery);
     }
 
     const countRows = this.sql
-      .exec(
+      .exec<{ count: number }>(
         `SELECT COUNT(*) as count FROM documents
          WHERE ${whereClause}`,
         ...params,
       )
-      .toArray() as Array<{ count: number }>;
+      .toArray();
     const totalCount = Number(countRows[0]?.count || 0);
     const totalPages = Math.max(1, Math.ceil(totalCount / options.limit));
     const page = Math.min(Math.max(1, options.page), totalPages);
     const offset = (page - 1) * options.limit;
 
     const documents = this.sql
-      .exec(
+      .exec<DocumentRow>(
         `SELECT * FROM documents
          WHERE ${whereClause}
          ORDER BY created_at DESC
@@ -182,9 +178,9 @@ export class RegistryDO extends DurableObject<Env> {
     };
   }
 
-  async getDocumentByFilename(filename: string, ownerEmail: string) {
+  async getDocumentByFilename(filename: string, ownerEmail: string): Promise<DocumentRow | null> {
     const rows = this.sql
-      .exec(
+      .exec<DocumentRow>(
         "SELECT * FROM documents WHERE filename = ? AND owner_email = ? LIMIT 1",
         filename,
         ownerEmail,
@@ -219,9 +215,9 @@ export class RegistryDO extends DurableObject<Env> {
     );
   }
 
-  async getRecentViews(userEmail: string, limit = 20) {
+  async getRecentViews(userEmail: string, limit = 20): Promise<RecentViewRow[]> {
     return this.sql
-      .exec(
+      .exec<RecentViewRow>(
         `SELECT d.id, d.title, d.filename, d.size, d.owner_email, d.created_at, v.last_viewed_at
        FROM views v JOIN documents d ON v.doc_id = d.id
        WHERE v.user_email = ?

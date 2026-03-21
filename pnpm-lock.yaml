@@ -20,9 +20,15 @@ importers:
       conf:
         specifier: ^13.0.0
         version: 13.1.0
+      highlight.js:
+        specifier: ^11.11.1
+        version: 11.11.1
       marked:
         specifier: ^15.0.0
         version: 15.0.12
+      marked-highlight:
+        specifier: ^2.2.3
+        version: 2.2.3(marked@15.0.12)
     devDependencies:
       '@types/bun':
         specifier: ^1.3.6
@@ -59,7 +65,7 @@ importers:
         specifier: ^6.0.0
         version: 6.4.1(@types/node@22.19.15)(tsx@4.21.0)
       wrangler:
-        specifier: ^4.0.0
+        specifier: ^4.20.0
         version: 4.71.0(@cloudflare/workers-types@4.20260306.1)
 
   packages/shared:
@@ -822,6 +828,10 @@ packages:
   get-tsconfig@4.13.6:
     resolution: {integrity: sha512-shZT/QMiSHc/YBLxxOkMtgSid5HFoauqCE3/exfsEcwg1WkeqjG+V40yBbBrsD+jW2HDXcs28xOfcbm2jI8Ddw==}
 
+  highlight.js@11.11.1:
+    resolution: {integrity: sha512-Xwwo44whKBVCYoliBQwaPvtd/2tYFkRQtXDWj1nackaV2JPXx3L0+Jvd8/qCJ2p+ML0/XVkJ2q+Mr+UVdpJK5w==}
+    engines: {node: '>=12.0.0'}
+
   hono@4.12.5:
     resolution: {integrity: sha512-3qq+FUBtlTHhtYxbxheZgY8NIFnkkC/MR8u5TTsr7YZ3wixryQ3cCwn3iZbg8p8B88iDBBAYSfZDS75t8MN7Vg==}
     engines: {node: '>=16.9.0'}
@@ -838,6 +848,11 @@ packages:
   kleur@4.1.5:
     resolution: {integrity: sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ==}
     engines: {node: '>=6'}
+
+  marked-highlight@2.2.3:
+    resolution: {integrity: sha512-FCfZRxW/msZAiasCML4isYpxyQWKEEx44vOgdn5Kloae+Qc3q4XR7WjpKKf8oMLk7JP9ZCRd2vhtclJFdwxlWQ==}
+    peerDependencies:
+      marked: '>=4 <18'
 
   marked@15.0.12:
     resolution: {integrity: sha512-8dD6FusOQSrpv9Z1rdNMdlSgQOIP880DHqnohobOmYLElGEqAL/JvxvuxZO16r4HtjTlfPRDC1hbvxC9dPN2nA==}
@@ -1558,6 +1573,8 @@ snapshots:
       resolve-pkg-maps: 1.0.0
     optional: true
 
+  highlight.js@11.11.1: {}
+
   hono@4.12.5: {}
 
   jose@6.2.0: {}
@@ -1567,6 +1584,10 @@ snapshots:
   json-schema-typed@8.0.2: {}
 
   kleur@4.1.5: {}
+
+  marked-highlight@2.2.3(marked@15.0.12):
+    dependencies:
+      marked: 15.0.12
 
   marked@15.0.12: {}
 

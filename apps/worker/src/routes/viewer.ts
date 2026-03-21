@@ -1,14 +1,14 @@
 import { Hono } from "hono";
-import type { Env } from "../types.js";
 import { ShellView } from "../frontend/shell.js";
 import { getAuthenticatedUser } from "../utils/auth.js";
 import { getAssetUrls } from "../utils/assets.js";
 import { getRegistry } from "../utils/registry.js";
+import type { DocumentRow } from "../types.js";
 
 const viewer = new Hono<{ Bindings: Env }>();
 
 function canViewDocument(
-  doc: { owner_email: string; is_shared?: number },
+  doc: Pick<DocumentRow, "owner_email" | "is_shared">,
   email: string,
 ): boolean {
   return doc.owner_email === email || Boolean(doc.is_shared);
@@ -28,7 +28,7 @@ viewer.get("/d/:id", async (c) => {
   const user = await getAuthenticatedUser(c.req.raw, c.env);
   if (!user) return c.text("Unauthorized", 401);
   const email = user.email;
-  if (!canViewDocument(doc as { owner_email: string; is_shared?: number }, email)) {
+  if (!canViewDocument(doc, email)) {
     return c.text("Not found", 404);
   }
 
@@ -40,8 +40,8 @@ viewer.get("/d/:id", async (c) => {
   return c.html(
     ShellView({
       docId: id,
-      title: doc.title as string,
-      ownerEmail: doc.owner_email as string,
+      title: doc.title,
+      ownerEmail: doc.owner_email,
       email,
       authMode: c.env.AUTH_MODE,
       isShared: Boolean(doc.is_shared),
@@ -64,7 +64,7 @@ viewer.get("/d/:id/content", async (c) => {
 
   const user = await getAuthenticatedUser(c.req.raw, c.env);
   if (!user) return c.text("Unauthorized", 401);
-  if (!canViewDocument(doc as { owner_email: string; is_shared?: number }, user.email)) {
+  if (!canViewDocument(doc, user.email)) {
     return c.text("Not found", 404);
   }
 
@@ -117,7 +117,7 @@ viewer.get("/d/:id/ws", async (c) => {
   if (!user) {
     return c.text("Unauthorized", 401);
   }
-  if (!canViewDocument(doc as { owner_email: string; is_shared?: number }, user.email)) {
+  if (!canViewDocument(doc, user.email)) {
     return c.text("Not found", 404);
   }
 

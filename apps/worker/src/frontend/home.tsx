@@ -1,24 +1,15 @@
 /** @jsxImportSource hono/jsx */
 import { raw } from "hono/utils/html";
-import type { HtmlEscapedString } from "hono/utils/html";
 import type { AssetUrls } from "../utils/assets.js";
-
-interface Document {
-  id: string;
-  title: string;
-  filename: string;
-  size: number;
-  owner_email: string;
-  created_at: string;
-  last_viewed_at?: string;
-}
+import type { DocumentRow, RecentViewRow } from "../types.js";
+import { toHtml, escapeScriptContent } from "./jsx.js";
 
 interface HomeParams {
   assets: AssetUrls;
   email: string;
   workerUrl: string;
-  documents: Document[];
-  recentViews: Document[];
+  documents: DocumentRow[];
+  recentViews: RecentViewRow[];
   query: string;
   page: number;
   pageSize: number;
@@ -44,7 +35,7 @@ function formatSize(bytes: number): string {
   return (bytes / 1024).toFixed(1) + "KB";
 }
 
-function DocCard({ doc, subtitle }: { doc: Document; subtitle: string }) {
+function DocCard({ doc, subtitle }: { doc: DocumentRow; subtitle: string }) {
   return (
     <a class="doc-card" href={`/d/${doc.id}`}>
       <div class="doc-card-top">
@@ -59,7 +50,7 @@ function DocCard({ doc, subtitle }: { doc: Document; subtitle: string }) {
   );
 }
 
-function RecentDocCard({ doc }: { doc: Document }) {
+function RecentDocCard({ doc }: { doc: RecentViewRow }) {
   const viewedAt = doc.last_viewed_at || doc.created_at;
 
   return (
@@ -256,6 +247,26 @@ function getHomeSearchScript(pageSize: number, workerUrl: string, page: number):
   `;
 }
 
+function SetupBlock({ workerUrl, requiresLogin }: { workerUrl: string; requiresLogin: boolean }) {
+  return (
+    <div class="setup-block">
+      <p>
+        Deploy HTML, Markdown, or code files with the{" "}
+        <a href="https://github.com/jonesphillip/sharehtml">sharehtml CLI</a>.{" "}
+        Requires <a href="https://bun.sh">Bun</a>.
+      </p>
+      {raw(`<pre><span class="cmd-comment"># install the CLI</span>
+bun install -g sharehtml
+
+<span class="cmd-comment"># configure</span>
+sharehtml config set-url ${workerUrl}
+${requiresLogin ? "sharehtml login\n" : ""}
+<span class="cmd-comment"># deploy a file</span>
+sharehtml deploy example/coffee-report.html</pre>`)}
+    </div>
+  );
+}
+
 export function HomeView({
   assets,
   email,
@@ -267,7 +278,7 @@ export function HomeView({
   pageSize,
   totalCount,
   requiresLogin,
-}: HomeParams): HtmlEscapedString {
+}: HomeParams) {
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   const hasDocuments = totalCount > 0;
   const hasQuery = query.length > 0;
@@ -277,7 +288,7 @@ export function HomeView({
     ? `${totalCount} match${totalCount === 1 ? "" : "es"}`
     : `${totalCount} document${totalCount === 1 ? "" : "s"}`;
 
-  return (
+  const jsx = (
     <html lang="en">
       <head>
         <meta charset="utf-8" />
@@ -328,43 +339,11 @@ export function HomeView({
               ) : hasQuery ? (
                 <div class="section-empty">no documents match "{query}"</div>
               ) : (
-                <div class="setup-block">
-                  <p>
-                    Deploy HTML, Markdown, or code files with the{" "}
-                    <a href="https://github.com/jonesphillip/sharehtml">sharehtml CLI</a>, then:
-                  </p>
-                  {raw(`<pre><span class="cmd-comment"># install the CLI</span>
-git clone https://github.com/jonesphillip/sharehtml.git
-cd sharehtml && pnpm install
-cd apps/cli && pnpm build && bun link
-
-<span class="cmd-comment"># configure</span>
-sharehtml config set-url ${workerUrl}
-${requiresLogin ? "sharehtml login\n" : ""}
-
-<span class="cmd-comment"># deploy a file</span>
-sharehtml deploy example/coffee-report.html</pre>`)}
-                </div>
+                <SetupBlock workerUrl={workerUrl} requiresLogin={requiresLogin} />
               )}
             </div>
             <template id="documents-setup-template">
-              <div class="setup-block">
-                <p>
-                  Deploy HTML, Markdown, or code files with the{" "}
-                  <a href="https://github.com/jonesphillip/sharehtml">sharehtml CLI</a>, then:
-                </p>
-                {raw(`<pre><span class="cmd-comment"># install the CLI</span>
-git clone https://github.com/jonesphillip/sharehtml.git
-cd sharehtml && pnpm install
-cd apps/cli && pnpm build && bun link
-
-<span class="cmd-comment"># configure</span>
-sharehtml config set-url ${workerUrl}
-${requiresLogin ? "sharehtml login\n" : ""}
-
-<span class="cmd-comment"># deploy a file</span>
-sharehtml deploy example/coffee-report.html</pre>`)}
-              </div>
+              <SetupBlock workerUrl={workerUrl} requiresLogin={requiresLogin} />
             </template>
             {hasDocuments && totalPages > 1 && (
               <div class="docs-pagination" id="documents-pagination">
@@ -392,8 +371,9 @@ sharehtml deploy example/coffee-report.html</pre>`)}
             ) : null}
           </div>
         </div>
-        <script>{raw(getHomeSearchScript(pageSize, workerUrl, page))}</script>
+        <script>{raw(escapeScriptContent(getHomeSearchScript(pageSize, workerUrl, page)))}</script>
       </body>
     </html>
-  ) as unknown as HtmlEscapedString;
+  );
+  return toHtml(jsx);
 }

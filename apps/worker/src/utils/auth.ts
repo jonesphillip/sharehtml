@@ -1,15 +1,10 @@
 import { createMiddleware } from "hono/factory";
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-import type { Env, AppBindings } from "../types.js";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import type { AppBindings } from "../types.js";
 
 export interface AuthUser {
   id: string;
   email: string;
-}
-
-interface AccessJWTPayload extends JWTPayload {
-  email?: string;
-  sub?: string;
 }
 
 let jwksCache: ReturnType<typeof createRemoteJWKSet> | null = null;
@@ -40,16 +35,14 @@ async function verifyAccessJWT(jwt: string, env: Env): Promise<AuthUser | null> 
       issuer: `https://${env.ACCESS_TEAM}.cloudflareaccess.com`,
     });
 
-    const accessPayload = payload as AccessJWTPayload;
-    if (!accessPayload.sub || !accessPayload.email) {
+    const { sub } = payload;
+    const email = "email" in payload && typeof payload.email === "string" ? payload.email : null;
+    if (!sub || !email) {
       console.error("JWT missing sub or email claim");
       return null;
     }
 
-    return {
-      id: accessPayload.sub,
-      email: accessPayload.email,
-    };
+    return { id: sub, email };
   } catch (error) {
     console.error(
       "JWT verification failed",
