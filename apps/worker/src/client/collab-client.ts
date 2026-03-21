@@ -314,11 +314,18 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
     return isAnnotatableElement(element) ? element : null;
   }
 
+  const hoverMutationTargets = new Set<Element>();
   function setHoveredAnnotatableElement(element: Element | null) {
     if (hoveredAnnotatableElement === element) return;
-    hoveredAnnotatableElement?.classList.remove("collab-element-target");
+    if (hoveredAnnotatableElement) {
+      hoverMutationTargets.add(hoveredAnnotatableElement);
+      hoveredAnnotatableElement.classList.remove("collab-element-target");
+    }
     hoveredAnnotatableElement = element;
-    hoveredAnnotatableElement?.classList.add("collab-element-target");
+    if (hoveredAnnotatableElement) {
+      hoverMutationTargets.add(hoveredAnnotatableElement);
+      hoveredAnnotatableElement.classList.add("collab-element-target");
+    }
   }
 
   function getAnnotatableLabel(element: HTMLImageElement | HTMLCanvasElement): string {
@@ -1423,8 +1430,26 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
   }
 
   const mutationObserver = new MutationObserver((mutations) => {
+    // Drain hover targets so we can identify class mutations we caused
+    let drainedHoverTargets: Set<Element> | null = null;
+    if (hoverMutationTargets.size > 0) {
+      drainedHoverTargets = new Set(hoverMutationTargets);
+      hoverMutationTargets.clear();
+    }
+
     const shouldRefresh = mutations.some((mutation) => {
-      return !isOverlayMutationTarget(mutation.target);
+      if (isOverlayMutationTarget(mutation.target)) return false;
+      // Ignore class mutations caused by hover-highlight toggling
+      if (
+        drainedHoverTargets &&
+        mutation.type === "attributes" &&
+        mutation.attributeName === "class" &&
+        mutation.target instanceof Element &&
+        drainedHoverTargets.has(mutation.target)
+      ) {
+        return false;
+      }
+      return true;
     });
 
     if (shouldRefresh) {
