@@ -14,7 +14,6 @@ function upload(filename: string, content: string, title?: string) {
 
 describe("Document API", () => {
   it("uploads, lists, fetches, and deletes a document", async () => {
-    // Upload
     const uploadRes = await upload("test.html", html, "Test Doc");
     expect(uploadRes.status).toBe(200);
     const doc = await uploadRes.json<{ id: string; title: string; filename: string; size: number }>();
@@ -22,30 +21,25 @@ describe("Document API", () => {
     expect(doc.filename).toBe("test.html");
     expect(doc.id).toBeTruthy();
 
-    // List
     const listRes = await exports.default.fetch("https://example.com/api/documents");
     expect(listRes.status).toBe(200);
     const list = await listRes.json<{ documents: { id: string }[] }>();
     expect(list.documents.some((d) => d.id === doc.id)).toBe(true);
 
-    // Get metadata
     const metaRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}`);
     expect(metaRes.status).toBe(200);
     const meta = await metaRes.json<{ document: { id: string; title: string } }>();
     expect(meta.document.title).toBe("Test Doc");
 
-    // Download raw content
     const rawRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/raw`);
     expect(rawRes.status).toBe(200);
     expect(await rawRes.text()).toBe(html);
 
-    // Delete
     const deleteRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}`, {
       method: "DELETE",
     });
     expect(deleteRes.status).toBe(200);
 
-    // Verify gone
     const goneRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}`);
     expect(goneRes.status).toBe(404);
   });
@@ -85,7 +79,6 @@ describe("Document API", () => {
     expect(updated.title).toBe("Updated");
     expect(updated.filename).toBe("updated.html");
 
-    // Verify new content
     const rawRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/raw`);
     expect(await rawRes.text()).toBe("<h1>v2</h1>");
   });

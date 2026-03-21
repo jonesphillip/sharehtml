@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 
@@ -57,11 +57,12 @@ async function commandExists(cmd: string): Promise<boolean> {
   }
 }
 
-function run(cmd: string, args: string[], opts?: { input?: string; cwd?: string }): Promise<string> {
+function run(cmd: string, args: string[], opts?: { input?: string; cwd?: string; env?: Record<string, string> }): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile(cmd, args, {
       encoding: "utf-8",
       cwd: opts?.cwd,
+      env: opts?.env ? { ...process.env, ...opts.env } : undefined,
       maxBuffer: 10 * 1024 * 1024,
     }, (err, stdout, stderr) => {
       const outputText = [stdout, stderr].filter(Boolean).join("\n").trim();
@@ -208,7 +209,30 @@ function parseWranglerConfig(path: string): { name: string } {
     .replace(/\/\/.*$/gm, "")
     .replace(/\0\0/g, "//")
     .replace(/,\s*([\]}])/g, "$1");
-  return JSON.parse(cleaned);
+  const config = JSON.parse(cleaned);
+  // Use the production env name if available, since that's what we deploy
+  const prodName = config.env?.production?.name;
+  if (prodName) config.name = prodName;
+  return config;
+}
+
+function writeWranglerProductionVars(path: string, vars: Record<string, string>): void {
+  let content = readFileSync(path, "utf-8");
+
+  const productionVarsPattern = /("production"\s*:\s*\{[\s\S]*?"vars"\s*:\s*\{)([\s\S]*?)(\})/;
+  const match = content.match(productionVarsPattern);
+  if (!match) {
+    throw new Error("Could not find env.production.vars block in wrangler config");
+  }
+
+  let varsBlock = match[2];
+  for (const [key, value] of Object.entries(vars)) {
+    const pattern = new RegExp(`("${key}"\\s*:\\s*)"[^"]*"`, "g");
+    varsBlock = varsBlock.replace(pattern, `$1"${value}"`);
+  }
+
+  content = content.replace(match[0], match[1] + varsBlock + match[3]);
+  writeFileSync(path, content, "utf-8");
 }
 
 type SelectOption = { label: string; value: string; selected: boolean };
@@ -635,7 +659,7 @@ async function ensureCloudflaredForCli(): Promise<void> {
 async function main() {
   console.log();
   console.log(`  ${bold("sharehtml")} setup`);
-  console.log(`  ${dim("Deploy your worker, configure Cloudflare Access, and set secrets.")}`);
+  console.log(`  ${dim("Deploy your worker and configure Cloudflare Access.")}`);
   console.log();
 
   // Detect wrangler CLI auth
@@ -676,32 +700,11 @@ async function main() {
     process.exit(0);
   }
 
-  // Deploy
-  s = spinner("Deploying worker...", true);
-  let workerUrl: string;
-  let hostname: string;
-  try {
-    await run("npx", ["vite", "build"]);
-    const output = await run("npx", ["wrangler", "deploy"], { input: "y\n" });
-    const urlMatch = output.match(/https:\/\/[\w.-]+\.workers\.dev/);
-    if (!urlMatch) {
-      throw new Error("Could not parse worker URL from deploy output.");
-    }
-    workerUrl = urlMatch[0];
-    hostname = new URL(workerUrl).hostname;
-    s.stop(`Deployed ${cyan(workerUrl)}`);
-  } catch (e: any) {
-    s.stop();
-    const message = formatCommandError(e);
-    if (isMissingR2Error(message)) {
-      fail(getR2SetupMessage());
-    }
-    fail(`Deploy failed: ${message}`);
-  }
-
-  // Cloudflare Access
+  const accountId = wranglerAccount.id;
   console.log();
   const useAccess = await confirm("Require authentication with Cloudflare Access?");
+  let accessAud = "";
+  let accessTeam = "";
 
   if (useAccess) {
     console.log();
@@ -709,6 +712,7 @@ async function main() {
     console.log(`  Create a Cloudflare API token with these permissions:`);
     console.log(`    ${dim("-")} Access: Apps and Policies Edit`);
     console.log(`    ${dim("-")} Access: Organizations Read`);
+    console.log(`    ${dim("-")} Workers Scripts Read ${dim("(to resolve workers.dev subdomain)")}`);
     console.log(`  ${dim("Used once to configure Access policies, then discarded.")}`);
     console.log();
     if (await confirm(`Open ${cyan(cfTokenUrl)}?`)) {
@@ -727,7 +731,21 @@ async function main() {
       fail(`Invalid token: ${e.message}`);
     }
 
-    const accountId = wranglerAccount.id;
+    // Resolve the workers.dev hostname so we can configure the Access app
+    s = spinner("Resolving workers.dev hostname...", true);
+    let hostname: string;
+    try {
+      const subdomainResult = await cfApi(cfToken, "GET", `/accounts/${accountId}/workers/subdomain`);
+      hostname = `sharehtml.${subdomainResult.subdomain}.workers.dev`;
+      s.stop(`Hostname: ${hostname}`);
+    } catch {
+      s.stop();
+      fail(
+        "Could not resolve workers.dev subdomain.\n" +
+          "Ensure your API token has Workers Scripts Read permission, or deploy once first with `pnpm run deploy`.",
+      );
+    }
+
     while (true) {
       let existingPolicies: AccessPolicy[] = [];
       let existingApps: AccessApp[] = [];
@@ -776,17 +794,12 @@ async function main() {
           existingPolicies,
         );
 
-        s = spinner("Setting secrets...", true);
         const org = await cfApi(cfToken, "GET", `/accounts/${accountId}/access/organizations`);
-        const accessTeam = org.auth_domain.replace(".cloudflareaccess.com", "");
-        const accessAud = browserApp.aud;
-
-        await Promise.all([
-          run("npx", ["wrangler", "secret", "put", "AUTH_MODE"], { input: "access" }),
-          run("npx", ["wrangler", "secret", "put", "ACCESS_AUD"], { input: accessAud }),
-          run("npx", ["wrangler", "secret", "put", "ACCESS_TEAM"], { input: accessTeam }),
-        ]);
-        s.stop("Secrets set");
+        accessTeam = org.auth_domain.replace(".cloudflareaccess.com", "");
+        accessAud = browserApp.aud ?? "";
+        if (!accessAud) {
+          fail("Access app was created but has no audience tag (aud). Check the Cloudflare dashboard.");
+        }
         break;
       } catch (e: any) {
         s.stop();
@@ -805,21 +818,47 @@ async function main() {
         fail(`Access setup failed: ${message}`);
       }
     }
+  }
 
-  } else {
-    // No Access — set AUTH_MODE to "none"
-    s = spinner("Configuring open access...", true);
-    try {
-      await run("npx", ["wrangler", "secret", "put", "AUTH_MODE"], { input: "none" });
-      s.stop("Auth disabled");
-    } catch (e: any) {
-      s.stop();
-      fail(`Failed to set AUTH_MODE: ${e.message}`);
+  s = spinner("Updating wrangler.jsonc production vars...", true);
+  const productionVars: Record<string, string> = useAccess
+    ? { AUTH_MODE: "access", ACCESS_AUD: accessAud, ACCESS_TEAM: accessTeam }
+    : { AUTH_MODE: "none" };
+  try {
+    writeWranglerProductionVars(configPath, productionVars);
+    s.stop("Production vars updated");
+  } catch (e: any) {
+    s.stop();
+    fail(`Failed to update wrangler.jsonc: ${e.message}`);
+  }
+
+  s = spinner("Deploying worker (production)...", true);
+  let workerUrl: string;
+  try {
+    await run("npx", ["vite", "build"], { env: { CLOUDFLARE_ENV: "production" } });
+    const output = await run("npx", ["wrangler", "deploy"], { input: "y\n" });
+    const urlMatch = output.match(/https:\/\/[\w.-]+\.workers\.dev/);
+    if (!urlMatch) {
+      throw new Error("Could not parse worker URL from deploy output.");
     }
+    workerUrl = urlMatch[0];
+    s.stop(`Deployed ${cyan(workerUrl)}`);
+  } catch (e: any) {
+    s.stop();
+    const message = formatCommandError(e);
+    if (isMissingR2Error(message)) {
+      fail(getR2SetupMessage());
+    }
+    fail(`Deploy failed: ${message}`);
+  }
 
+  if (!useAccess) {
     console.log();
     console.log(`  ${dim("Note: anyone with the URL can view and comment.")}`);
     console.log(`  ${dim("Run setup again to add Cloudflare Access later.")}`);
+  } else {
+    console.log();
+    console.log(`  ${dim("Note: wrangler.jsonc now contains your deployment config.")}`);
   }
 
   // CLI install

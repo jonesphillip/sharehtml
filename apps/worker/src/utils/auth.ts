@@ -60,7 +60,8 @@ async function verifyAccessJWT(jwt: string, env: Env): Promise<AuthUser | null> 
 }
 
 export const authMiddleware = createMiddleware<AppBindings>(async (c, next) => {
-  if (c.env.AUTH_MODE !== "access") {
+  // Fail closed: only skip auth when explicitly set to "none"
+  if (c.env.AUTH_MODE === "none") {
     c.set("authUser", { id: "dev", email: "dev@localhost" });
     await next();
     return;

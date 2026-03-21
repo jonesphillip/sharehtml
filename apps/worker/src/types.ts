@@ -1,10 +1,4 @@
-export type AuthMode = "access" | "none";
-
-declare global {
-  interface Env {
-    AUTH_MODE: AuthMode;
-  }
-}
+export type AuthMode = Env["AUTH_MODE"];
 
 export type DocumentRow = {
   id: string;

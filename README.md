@@ -47,6 +47,7 @@ If your team already has a sharehtml worker deployed, this is probably all you n
 If you enable Cloudflare Access, you'll need a [Cloudflare API token](https://dash.cloudflare.com/profile/api-tokens) with these permissions:
 - **Account > Access: Apps and Policies > Edit**
 - **Account > Access: Organization, Identity Providers, and Groups > Read**
+- **Account > Workers Scripts > Read** (to resolve your workers.dev subdomain)
 
 When it's done, try deploying one of the included examples:
 
@@ -67,11 +68,7 @@ If a document with the same filename exists, the CLI will prompt to update it. U
 If you've already run setup and just need to redeploy:
 
 ```bash
-# Deploy the worker to Cloudflare
 pnpm run deploy
-
-# Build and link the CLI globally
-cd apps/cli && pnpm build && bun link
 ```
 
 ### Local development
@@ -80,7 +77,7 @@ cd apps/cli && pnpm build && bun link
 pnpm dev
 ```
 
-Starts the Vite dev server with Wrangler at http://localhost:5173. In dev mode, `AUTH_MODE` is `"none"` — no login required.
+Starts the Vite dev server with Wrangler at http://localhost:5173. Local dev uses the default environment — `AUTH_MODE` is `"none"`, no login required.
 
 To use the CLI locally:
 
@@ -124,11 +121,11 @@ Browser ◄┘──► Durable Objects
 
 ## Configuration
 
-### Secrets (set via `pnpm run setup` or `npx wrangler secret put`)
+Auth config lives in `wrangler.jsonc` under `env.production.vars`, set by `pnpm run setup`:
 
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `AUTH_MODE` | No | `"none"` disables auth, `"access"` enables Cloudflare Access JWT verification. Defaults to no auth if unset. The setup script sets this for you. |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AUTH_MODE` | Yes | `"none"` disables auth, `"access"` enables Cloudflare Access JWT verification |
 | `ACCESS_AUD` | When `AUTH_MODE=access` | Cloudflare Access Application Audience tag |
 | `ACCESS_TEAM` | When `AUTH_MODE=access` | Cloudflare Access team name |
 

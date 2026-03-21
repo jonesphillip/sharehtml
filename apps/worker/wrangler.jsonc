@@ -1,8 +1,13 @@
 {
-  "name": "sharehtml",
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sharehtml-dev",
   "main": "src/index.ts",
   "compatibility_date": "2025-04-01",
-  "vars": {},
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "AUTH_MODE": "none",
+  },
   "assets": {
     "not_found_handling": "none",
     "binding": "ASSETS",
@@ -11,7 +16,7 @@
   "r2_buckets": [
     {
       "binding": "DOCUMENTS_BUCKET",
-      "bucket_name": "sharehtml-documents",
+      "bucket_name": "sharehtml-documents-dev",
     },
   ],
   "durable_objects": {
@@ -26,6 +31,7 @@
       },
     ],
   },
+  "upload_source_maps": true,
   "observability": {
     "logs": {
       "enabled": true,
@@ -41,4 +47,49 @@
       "new_sqlite_classes": ["DocumentDO", "RegistryDO"],
     },
   ],
+  "env": {
+    "production": {
+      "name": "sharehtml",
+      "workers_dev": true,
+      "preview_urls": false,
+      "upload_source_maps": true,
+      "observability": {
+        "logs": {
+          "enabled": true,
+          "invocation_logs": true,
+        },
+        "traces": {
+          "enabled": true,
+        },
+      },
+      "vars": {
+        "AUTH_MODE": "access",
+        "ACCESS_AUD": "",
+        "ACCESS_TEAM": "",
+      },
+      "assets": {
+        "not_found_handling": "none",
+        "binding": "ASSETS",
+        "run_worker_first": ["/d/*", "/api/*", "/health", "/"],
+      },
+      "r2_buckets": [
+        {
+          "binding": "DOCUMENTS_BUCKET",
+          "bucket_name": "sharehtml-documents",
+        },
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "DOCUMENT_DO",
+            "class_name": "DocumentDO",
+          },
+          {
+            "name": "REGISTRY_DO",
+            "class_name": "RegistryDO",
+          },
+        ],
+      },
+    },
+  },
 }

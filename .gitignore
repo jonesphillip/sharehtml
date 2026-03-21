@@ -5,3 +5,6 @@ dist/
 .env
 *.log
 .DS_Store
+
+# Generated test config (created by vitest.config.ts from wrangler.jsonc)
+apps/worker/tests/wrangler.jsonc
