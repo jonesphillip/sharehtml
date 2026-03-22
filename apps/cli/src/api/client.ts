@@ -199,15 +199,25 @@ export async function deleteDocument(id: string): Promise<void> {
   });
 }
 
-export async function setDocumentSharing(id: string, isShared: boolean): Promise<boolean> {
+type ShareMode = "private" | "link" | "emails";
+type ShareOptions = { mode: "private" } | { mode: "link" } | { mode: "emails"; emails: string[] };
+type ShareState = { mode: ShareMode; emails: string[] };
+
+export async function setDocumentSharing(id: string, options: ShareOptions): Promise<ShareState> {
   const resp = await requestWithAccess("Update sharing", {
     path: `/api/documents/${id}/share`,
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ isShared }),
+    body: JSON.stringify(options),
   });
-  const data = await parseJson<{ ok: boolean; isShared: boolean }>(resp, "Update sharing");
-  return data.isShared;
+  return parseJson<ShareState>(resp, "Update sharing");
+}
+
+export async function getDocumentSharing(id: string): Promise<ShareState> {
+  const resp = await requestWithAccess("Get sharing", {
+    path: `/api/documents/${id}/share`,
+  });
+  return parseJson<ShareState>(resp, "Get sharing");
 }
 
 export async function downloadDocument(id: string): Promise<{ filename: string; content: Uint8Array }> {

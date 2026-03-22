@@ -3,13 +3,14 @@ import "./styles.css";
 import type { Anchor, Comment, Reaction, UserPresence } from "@sharehtml/shared";
 
 type AuthMode = "access" | "none";
+type ShareMode = "private" | "link" | "emails";
 
 const config = (window as unknown as {
   __COMMENT_CONFIG__: {
     docId: string;
     email: string;
     authMode: AuthMode;
-    isShared: boolean;
+    shareMode: ShareMode;
     canManageSharing: boolean;
   };
 })
@@ -43,7 +44,9 @@ let iframeDriven = false;
 let suppressScrollSync = false;
 let sidebarSpacer: HTMLElement | null = null;
 let hasAnimatedHighlights = false;
-let isShared = AUTH_MODE === "access" ? config.isShared : true;
+let shareMode: ShareMode = AUTH_MODE === "access" ? config.shareMode : "link";
+let sharedEmails: string[] = [];
+let emailsLoaded = false;
 let shareMessageOverride: string | null = null;
 let isSavingShareState = false;
 const ANNOTATION_ALIGNMENT_BIAS_PX = 24;
@@ -65,9 +68,12 @@ const shareBtn = document.getElementById("share-btn")!;
 const shareModal = document.getElementById("share-modal")!;
 const shareLinkInput = document.getElementById("share-link-input") as HTMLInputElement;
 const shareCopyBtn = document.getElementById("share-copy-btn")!;
-const shareStatusText = document.getElementById("share-status-text")!;
-const shareToggle = document.getElementById("share-toggle") as HTMLInputElement;
-const shareNote = document.getElementById("share-note")!;
+const shareModeSelect = document.getElementById("share-mode-select") as HTMLSelectElement;
+const shareModeDescription = document.getElementById("share-mode-description")!;
+const shareEmailsSection = document.getElementById("share-emails-section")!;
+const shareEmailInput = document.getElementById("share-email-input") as HTMLInputElement;
+const shareEmailAdd = document.getElementById("share-email-add")!;
+const shareEmailList = document.getElementById("share-email-list")!;
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 const SANDBOXED_IFRAME_ORIGIN = "null";
 
@@ -89,84 +95,150 @@ function closeSidebar() {
   sendToIframe({ type: "sidebar:state", open: false });
 }
 
-function getShareStatusText(): string {
-  if (AUTH_MODE !== "access") {
-    return "anyone with the link can view and comment";
+function getShareDescription(): string {
+  if (shareMessageOverride) return shareMessageOverride;
+  if (AUTH_MODE !== "access") return "anyone with the link can view and comment";
+  switch (shareMode) {
+    case "link":
+      return "anyone allowed by your Cloudflare Access policy can view and comment";
+    case "emails":
+      if (sharedEmails.length === 0) return "add people to share this document";
+      return `shared with ${sharedEmails.length} ${sharedEmails.length === 1 ? "person" : "people"}`;
+    case "private":
+      return "only you can open this document";
   }
-
-  if (isShared) {
-    return "anyone with the link who is allowed by Cloudflare Access can view and comment";
-  }
-
-  return "only you can open this document";
-}
-
-function getShareNoteText(): string {
-  if (shareMessageOverride) {
-    return shareMessageOverride;
-  }
-
-  if (AUTH_MODE !== "access") {
-    return "Cloudflare Access is required to turn link sharing off.";
-  }
-
-  if (!CAN_MANAGE_SHARING) {
-    return "Only the document owner can change sharing.";
-  }
-
-  if (isShared) {
-    return "Turn sharing off to make this document private again.";
-  }
-
-  return "Turn sharing on to let anyone with the link open it.";
 }
 
 function renderShareModal() {
   shareLinkInput.value = location.href;
-  shareStatusText.textContent = getShareStatusText();
-  shareNote.textContent = getShareNoteText();
+  shareModeSelect.value = shareMode;
+  shareModeSelect.disabled = isSavingShareState || !CAN_MANAGE_SHARING;
+  shareModeDescription.textContent = getShareDescription();
   shareCopyBtn.textContent = "copy";
-  shareToggle.checked = AUTH_MODE !== "access" || isShared;
-  shareToggle.disabled = isSavingShareState || !CAN_MANAGE_SHARING;
   shareCopyBtn.disabled = isSavingShareState;
+  shareEmailsSection.style.display = shareMode === "emails" ? "" : "none";
+  shareEmailInput.disabled = isSavingShareState || !CAN_MANAGE_SHARING;
+  shareEmailAdd.classList.toggle("disabled", isSavingShareState || !CAN_MANAGE_SHARING);
+  renderEmailList();
 }
 
-async function updateSharing(nextShared: boolean): Promise<boolean> {
-  if (!CAN_MANAGE_SHARING || AUTH_MODE !== "access" || nextShared === isShared) {
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function escapeAttr(s: string): string {
+  return escapeHtml(s).replace(/'/g, "&#39;");
+}
+
+function renderEmailList() {
+  if (!emailsLoaded && shareMode === "emails") {
+    shareEmailList.innerHTML = '<div class="share-email-loading">loading…</div>';
+    return;
+  }
+  shareEmailList.innerHTML = sharedEmails
+    .map(
+      (email) =>
+        `<div class="share-email-item"><span>${escapeHtml(email)}</span>${CAN_MANAGE_SHARING ? `<button class="share-email-remove" data-email="${escapeAttr(email)}">×</button>` : ""}</div>`,
+    )
+    .join("");
+}
+
+function isShareMode(v: unknown): v is ShareMode {
+  return v === "private" || v === "link" || v === "emails";
+}
+
+function parseShareResponse(data: unknown): { mode: ShareMode; emails: string[] } | null {
+  if (typeof data !== "object" || data === null) return null;
+  const obj = data as Record<string, unknown>;
+  if (!isShareMode(obj.mode)) return null;
+  const emails = Array.isArray(obj.emails) ? obj.emails.filter((e): e is string => typeof e === "string") : [];
+  return { mode: obj.mode, emails };
+}
+
+async function loadShareState() {
+  if (emailsLoaded) return;
+  try {
+    const response = await fetch(`/api/documents/${DOC_ID}/share`);
+    if (!response.ok) throw new Error("fetch failed");
+    const data = parseShareResponse(await response.json());
+    if (!data) throw new Error("invalid response");
+    shareMode = data.mode;
+    sharedEmails = data.emails;
+    emailsLoaded = true;
+  } catch {
+    emailsLoaded = true;
+    sharedEmails = [];
+  }
+  renderShareModal();
+}
+
+async function updateShareMode(nextMode: ShareMode, nextEmails?: string[]): Promise<boolean> {
+  if (!CAN_MANAGE_SHARING || AUTH_MODE !== "access") {
     renderShareModal();
     return true;
   }
 
   isSavingShareState = true;
-  shareMessageOverride = "saving...";
+  shareMessageOverride = "saving…";
   renderShareModal();
 
   try {
+    const body: Record<string, unknown> = { mode: nextMode };
+    if (nextMode === "emails") {
+      body.emails = nextEmails ?? sharedEmails;
+    }
+
     const response = await fetch(`/api/documents/${DOC_ID}/share`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ isShared: nextShared }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
       shareMessageOverride = "could not update sharing. try again.";
-      isSavingShareState = false;
-      renderShareModal();
       return false;
     }
 
-    const result = await response.json() as { isShared: boolean };
-    isShared = result.isShared;
+    const result = parseShareResponse(await response.json());
+    if (!result) {
+      shareMessageOverride = "unexpected response. try again.";
+      return false;
+    }
+
+    shareMode = result.mode;
+    sharedEmails = result.emails;
+    emailsLoaded = true;
     shareMessageOverride = null;
-    isSavingShareState = false;
-    renderShareModal();
     return true;
   } catch {
     shareMessageOverride = "could not update sharing. try again.";
+    return false;
+  } finally {
     isSavingShareState = false;
+    renderShareModal();
+  }
+}
+
+async function addEmail(email: string): Promise<boolean> {
+  const normalized = email.toLowerCase().trim();
+  if (!normalized || !normalized.includes("@")) return false;
+  if (normalized === USER_EMAIL.toLowerCase()) {
+    shareMessageOverride = "you already have access as the owner";
     renderShareModal();
     return false;
   }
+  if (sharedEmails.includes(normalized)) return true;
+  if (sharedEmails.length >= 100) {
+    shareMessageOverride = "maximum 100 people";
+    renderShareModal();
+    return false;
+  }
+  return updateShareMode("emails", [...sharedEmails, normalized]);
+}
+
+async function removeEmail(email: string): Promise<boolean> {
+  const remaining = sharedEmails.filter((e) => e !== email);
+  return updateShareMode("emails", remaining);
 }
 
 // Init
@@ -235,6 +307,7 @@ function setupEventListeners() {
     renderShareModal();
     shareModal.style.display = "flex";
     shareLinkInput.select();
+    loadShareState();
   });
   shareCopyBtn.addEventListener("click", () => {
     navigator.clipboard.writeText(shareLinkInput.value).then(() => {
@@ -244,11 +317,35 @@ function setupEventListeners() {
       }, 1500);
     });
   });
-  shareToggle.addEventListener("change", async () => {
-    const saved = await updateSharing(shareToggle.checked);
+  shareModeSelect.addEventListener("change", async () => {
+    const nextMode = shareModeSelect.value;
+    if (!isShareMode(nextMode)) return;
+    const saved = await updateShareMode(nextMode);
     if (!saved) {
-      shareToggle.checked = isShared;
+      shareModeSelect.value = shareMode;
     }
+  });
+  shareEmailAdd.addEventListener("click", async () => {
+    const email = shareEmailInput.value.trim();
+    if (await addEmail(email)) {
+      shareEmailInput.value = "";
+    }
+  });
+  shareEmailInput.addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const email = shareEmailInput.value.trim();
+    if (await addEmail(email)) {
+      shareEmailInput.value = "";
+    }
+  });
+  shareEmailList.addEventListener("click", (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+    const btn = target.closest(".share-email-remove");
+    if (!(btn instanceof HTMLElement)) return;
+    const email = btn.dataset.email;
+    if (email) removeEmail(email);
   });
   shareModal.addEventListener("click", (e) => {
     if (e.target === shareModal) shareModal.style.display = "none";

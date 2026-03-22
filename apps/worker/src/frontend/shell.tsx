@@ -1,7 +1,7 @@
 /** @jsxImportSource hono/jsx */
 import { raw } from "hono/utils/html";
 import type { AssetUrls } from "../utils/assets.js";
-import type { AuthMode } from "../types.js";
+import type { AuthMode, ShareMode } from "../types.js";
 import { toHtml, escapeScriptContent, safeJsonForScript } from "./jsx.js";
 
 interface ShellParams {
@@ -10,45 +10,27 @@ interface ShellParams {
   ownerEmail: string;
   email: string;
   authMode: AuthMode;
-  isShared: boolean;
+  shareMode: ShareMode;
   canManageSharing: boolean;
   assets: AssetUrls;
 }
 
-function getShareStatusText(authMode: AuthMode, isShared: boolean): string {
+function getShareDescription(authMode: AuthMode, shareMode: ShareMode): string {
   if (authMode !== "access") {
     return "anyone with the link can view and comment";
   }
-
-  if (isShared) {
-    return "anyone with the link who is allowed by Cloudflare Access can view and comment";
+  switch (shareMode) {
+    case "link":
+      return "anyone allowed by your Cloudflare Access policy can view and comment";
+    case "emails":
+      return "add people to share this document";
+    case "private":
+      return "only you can open this document";
   }
-
-  return "only you can open this document";
-}
-
-function getShareNoteText(
-  authMode: AuthMode,
-  isShared: boolean,
-  canManageSharing: boolean,
-): string {
-  if (authMode !== "access") {
-    return "Cloudflare Access is required to turn link sharing off.";
-  }
-
-  if (!canManageSharing) {
-    return "Only the document owner can change sharing.";
-  }
-
-  if (isShared) {
-    return "Turn sharing off to make this document private again.";
-  }
-
-  return "Turn sharing on to let anyone with the link open it.";
 }
 
 export function ShellView(
-  { docId, title, ownerEmail, email, authMode, isShared, canManageSharing, assets }: ShellParams,
+  { docId, title, ownerEmail, email, authMode, shareMode, canManageSharing, assets }: ShellParams,
 ) {
   const jsx = (
     <html lang="en">
@@ -140,38 +122,49 @@ export function ShellView(
         <div class="modal-backdrop" id="share-modal" style="display:none">
           <div class="modal-content">
             <div class="modal-title">share this document</div>
-            <div class="modal-email" id="share-status-text" style="margin-bottom:16px">
-              {getShareStatusText(authMode, isShared)}
-            </div>
             <div class="share-link-row">
               <input class="share-link-input" id="share-link-input" type="text" readonly />
               <button class="modal-submit share-copy-btn" id="share-copy-btn">
                 copy
               </button>
             </div>
-            <div class="share-toggle-row">
-              <div class="share-toggle-copy">
-                <div class="share-toggle-label">share by link</div>
-                <div class="share-toggle-note" id="share-note">
-                  {getShareNoteText(authMode, isShared, canManageSharing)}
-                </div>
-              </div>
-              <label class="share-switch">
+            <div class="share-mode-row">
+              <label class="share-mode-label">who can access</label>
+              <select
+                class="share-mode-select"
+                id="share-mode-select"
+                disabled={!canManageSharing}
+              >
+                <option value="private" selected={shareMode === "private"}>only me</option>
+                <option value="emails" selected={shareMode === "emails"}>specific people</option>
+                <option value="link" selected={shareMode === "link"}>anyone with the link</option>
+              </select>
+            </div>
+            <div class="share-mode-description" id="share-mode-description">
+              {getShareDescription(authMode, shareMode)}
+            </div>
+            <div class="share-emails-section" id="share-emails-section" style={shareMode !== "emails" ? "display:none" : ""}>
+              <div class="share-email-row">
                 <input
-                  id="share-toggle"
-                  type="checkbox"
-                  checked={authMode !== "access" || isShared}
+                  class="share-email-input"
+                  id="share-email-input"
+                  type="email"
+                  placeholder="email address"
+                  autocomplete="off"
                   disabled={!canManageSharing}
                 />
-                <span class="share-switch-ui"></span>
-              </label>
+                <button class="modal-submit share-email-add" id="share-email-add" disabled={!canManageSharing}>
+                  add
+                </button>
+              </div>
+              <div class="share-email-list" id="share-email-list"></div>
             </div>
           </div>
         </div>
 
         <script>
           {raw(
-            `window.__COMMENT_CONFIG__ = ${safeJsonForScript({ docId, email, authMode, isShared, canManageSharing })}`,
+            `window.__COMMENT_CONFIG__ = ${safeJsonForScript({ docId, email, authMode, shareMode, canManageSharing })}`,
           )}
         </script>
         <script type="module" src={assets.shellClientJs}></script>

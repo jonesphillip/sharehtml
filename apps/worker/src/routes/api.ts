@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { isRecord, parseDocumentSnapshot, type AppBindings, type DocumentSnapshot } from "../types.js";
+import { isRecord, isShareMode, parseDocumentSnapshot, shareModeFromInt, shareModeToInt, type AppBindings, type DocumentSnapshot, type ShareMode } from "../types.js";
 import { nanoid } from "../utils/ids.js";
 import { getRegistry } from "../utils/registry.js";
 import { extractDocumentTextFromHtml } from "../utils/document-text.js";
@@ -269,8 +269,20 @@ api.put("/documents/:id", async (c) => {
     title: resolvedTitle,
     filename,
     size: file.size,
-    isShared: Boolean(meta.is_shared),
+    isShared: meta.is_shared === 1,
   });
+});
+
+api.get("/documents/:id/share", async (c) => {
+  const id = c.req.param("id");
+  const registry = getRegistry(c.env);
+  const doc = await registry.getDocument(id);
+  if (!doc || doc.owner_email !== c.get("authUser").email) {
+    return c.json({ error: "not found" }, 404);
+  }
+  const mode = shareModeFromInt(doc.is_shared);
+  const emails = mode === "emails" ? await registry.getSharedEmails(id) : [];
+  return c.json({ mode, emails });
 });
 
 api.put("/documents/:id/share", async (c) => {
@@ -281,8 +293,32 @@ api.put("/documents/:id/share", async (c) => {
   }
 
   const body: unknown = await c.req.json();
-  if (!isRecord(body) || typeof body.isShared !== "boolean") {
-    return c.json({ error: "isShared must be a boolean" }, 400);
+  if (!isRecord(body)) {
+    return c.json({ error: "invalid request body" }, 400);
+  }
+
+  let mode: ShareMode;
+  let emails: string[] | undefined;
+
+  if (isShareMode(body.mode)) {
+    mode = body.mode;
+    if (mode === "emails") {
+      if (Array.isArray(body.emails)) {
+        if (body.emails.length > 100) {
+          return c.json({ error: "maximum 100 emails" }, 400);
+        }
+        if (!body.emails.every((e: unknown) => typeof e === "string" && e.includes("@"))) {
+          return c.json({ error: "each email must be a valid email address" }, 400);
+        }
+        emails = body.emails;
+      } else {
+        emails = [];
+      }
+    }
+  } else if (typeof body.isShared === "boolean") {
+    mode = body.isShared ? "link" : "private";
+  } else {
+    return c.json({ error: "must provide mode or isShared" }, 400);
   }
 
   const registry = getRegistry(c.env);
@@ -296,9 +332,14 @@ api.put("/documents/:id/share", async (c) => {
     return c.json({ error: "forbidden" }, 403);
   }
 
-  await registry.setDocumentShared(id, body.isShared);
+  const ownerEmail = meta.owner_email.toLowerCase();
+  await registry.setDocumentShareMode(id, shareModeToInt(mode));
+  if (emails) {
+    await registry.setSharedEmails(id, emails.filter((e) => e.toLowerCase() !== ownerEmail));
+  }
 
-  return c.json({ ok: true, isShared: body.isShared });
+  const responseEmails = mode === "emails" ? await registry.getSharedEmails(id) : [];
+  return c.json({ ok: true, mode, isShared: mode === "link", emails: responseEmails });
 });
 
 // Delete document

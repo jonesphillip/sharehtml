@@ -113,7 +113,7 @@ Browser ◄┘──► Durable Objects
 | `sharehtml open <id>` | Open a document in the browser |
 | `sharehtml pull <id>` | Download a document locally |
 | `sharehtml delete <id>` | Delete a document |
-| `sharehtml share <document>` | Make a document shareable |
+| `sharehtml share <document>` | Share by link, or `--add`/`--remove` emails |
 | `sharehtml unshare <document>` | Make a document private |
 | `sharehtml login` | Log in through Cloudflare Access |
 | `sharehtml config set-url <url>` | Set the sharehtml URL |

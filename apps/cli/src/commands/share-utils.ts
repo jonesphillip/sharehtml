@@ -49,9 +49,9 @@ export async function updateDocumentSharing(reference: string, isShared: boolean
     throw new Error(`Document not found: ${reference}`);
   }
 
-  const nextShared = await setDocumentSharing(document.id, isShared);
+  const result = await setDocumentSharing(document.id, { mode: isShared ? "link" : "private" });
   return {
     ...document,
-    isShared: nextShared,
+    isShared: result.mode === "link",
   };
 }

@@ -87,4 +87,27 @@ describe("Document API", () => {
     const res = await exports.default.fetch("https://example.com/api/documents/nonexistent");
     expect(res.status).toBe(404);
   });
+
+  it("returns share state for a document", async () => {
+    const uploadRes = await upload("share-test.html", html, "Share Test");
+    const doc = await uploadRes.json<{ id: string }>();
+
+    const res = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/share`);
+    expect(res.status).toBe(200);
+    const state = await res.json<{ mode: string; emails: string[] }>();
+    expect(state.mode).toBe("link");
+    expect(state.emails).toEqual([]);
+  });
+
+  it("rejects share updates when AUTH_MODE is not access", async () => {
+    const uploadRes = await upload("share-reject.html", html);
+    const doc = await uploadRes.json<{ id: string }>();
+
+    const res = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/share`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "private" }),
+    });
+    expect(res.status).toBe(400);
+  });
 });

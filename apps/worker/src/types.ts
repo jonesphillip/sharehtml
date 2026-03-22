@@ -1,4 +1,25 @@
 export type AuthMode = Env["AUTH_MODE"];
+export type ShareMode = "private" | "link" | "emails";
+
+export function isShareMode(value: unknown): value is ShareMode {
+  return value === "private" || value === "link" || value === "emails";
+}
+
+export function shareModeFromInt(n: number): ShareMode {
+  switch (n) {
+    case 1: return "link";
+    case 2: return "emails";
+    default: return "private";
+  }
+}
+
+export function shareModeToInt(mode: ShareMode): number {
+  switch (mode) {
+    case "link": return 1;
+    case "emails": return 2;
+    default: return 0;
+  }
+}
 
 export type DocumentRow = {
   id: string;

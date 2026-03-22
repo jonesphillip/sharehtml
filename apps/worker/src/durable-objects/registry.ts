@@ -57,6 +57,14 @@ export class RegistryDO extends DurableObject<Env> {
       )
     `);
     this.ensureDocumentSharingColumn();
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS shared_emails (
+        doc_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        added_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (doc_id, email)
+      )
+    `);
   }
 
   private ensureDocumentSharingColumn() {
@@ -199,12 +207,31 @@ export class RegistryDO extends DurableObject<Env> {
     );
   }
 
-  async setDocumentShared(id: string, isShared: boolean) {
-    this.sql.exec(
-      "UPDATE documents SET is_shared = ? WHERE id = ?",
-      isShared ? 1 : 0,
-      id,
-    );
+  async setDocumentShareMode(id: string, mode: number) {
+    this.sql.exec("UPDATE documents SET is_shared = ? WHERE id = ?", mode, id);
+    if (mode !== 2) {
+      this.sql.exec("DELETE FROM shared_emails WHERE doc_id = ?", id);
+    }
+  }
+
+  async setSharedEmails(docId: string, emails: string[]) {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM shared_emails WHERE doc_id = ?", docId);
+      for (const email of emails.slice(0, 100)) {
+        this.sql.exec(
+          "INSERT INTO shared_emails (doc_id, email) VALUES (?, ?)",
+          docId,
+          email.toLowerCase(),
+        );
+      }
+    });
+  }
+
+  async getSharedEmails(docId: string): Promise<string[]> {
+    return this.sql
+      .exec<{ email: string }>("SELECT email FROM shared_emails WHERE doc_id = ? ORDER BY added_at ASC", docId)
+      .toArray()
+      .map((row) => row.email);
   }
 
   async recordView(userEmail: string, docId: string) {
@@ -229,6 +256,7 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   async deleteDocument(id: string) {
+    this.sql.exec("DELETE FROM shared_emails WHERE doc_id = ?", id);
     this.sql.exec("DELETE FROM documents WHERE id = ?", id);
   }
 }

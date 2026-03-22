@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { AppBindings, DocumentRow } from "../types.js";
+import { shareModeFromInt, type AppBindings, type DocumentRow } from "../types.js";
 import { ShellView } from "../frontend/shell.js";
 import { getAssetUrls } from "../utils/assets.js";
 import { getRegistry } from "../utils/registry.js";
@@ -9,8 +9,25 @@ const viewer = new Hono<AppBindings>();
 function canViewDocument(
   doc: Pick<DocumentRow, "owner_email" | "is_shared">,
   email: string,
+  sharedEmails?: string[],
 ): boolean {
-  return doc.owner_email === email || Boolean(doc.is_shared);
+  if (doc.owner_email === email) return true;
+  if (doc.is_shared === 1) return true;
+  if (doc.is_shared === 2 && sharedEmails?.includes(email.toLowerCase())) return true;
+  return false;
+}
+
+async function loadDocWithAccessCheck(
+  env: AppBindings["Bindings"],
+  id: string,
+  email: string,
+): Promise<{ doc: DocumentRow; registry: ReturnType<typeof getRegistry> } | null> {
+  const registry = getRegistry(env);
+  const doc = await registry.getDocument(id);
+  if (!doc) return null;
+  const sharedEmails = doc.is_shared === 2 ? await registry.getSharedEmails(id) : undefined;
+  if (!canViewDocument(doc, email, sharedEmails)) return null;
+  return { doc, registry };
 }
 
 // Viewer shell
@@ -18,12 +35,9 @@ viewer.get("/d/:id", async (c) => {
   const id = c.req.param("id");
   const { email } = c.get("authUser");
 
-  const registry = getRegistry(c.env);
-  const doc = await registry.getDocument(id);
-
-  if (!doc || !canViewDocument(doc, email)) {
-    return c.text("Not found", 404);
-  }
+  const result = await loadDocWithAccessCheck(c.env, id, email);
+  if (!result) return c.text("Not found", 404);
+  const { doc, registry } = result;
 
   const assets = await getAssetUrls(c.env.ASSETS);
 
@@ -37,7 +51,7 @@ viewer.get("/d/:id", async (c) => {
       ownerEmail: doc.owner_email,
       email,
       authMode: c.env.AUTH_MODE,
-      isShared: Boolean(doc.is_shared),
+      shareMode: shareModeFromInt(doc.is_shared),
       canManageSharing: c.env.AUTH_MODE === "access" && doc.owner_email === email,
       assets,
     }),
@@ -49,12 +63,9 @@ viewer.get("/d/:id/content", async (c) => {
   const id = c.req.param("id");
   const { email } = c.get("authUser");
 
-  const registry = getRegistry(c.env);
-  const doc = await registry.getDocument(id);
-
-  if (!doc || !canViewDocument(doc, email)) {
-    return c.text("Not found", 404);
-  }
+  const result = await loadDocWithAccessCheck(c.env, id, email);
+  if (!result) return c.text("Not found", 404);
+  const { doc } = result;
 
   const obj = await c.env.DOCUMENTS_BUCKET.get(`${id}/${doc.filename}`);
 
@@ -96,11 +107,8 @@ viewer.get("/d/:id/ws", async (c) => {
   const id = c.req.param("id");
   const { email } = c.get("authUser");
 
-  const registry = getRegistry(c.env);
-  const doc = await registry.getDocument(id);
-  if (!doc || !canViewDocument(doc, email)) {
-    return c.text("Not found", 404);
-  }
+  const result = await loadDocWithAccessCheck(c.env, id, email);
+  if (!result) return c.text("Not found", 404);
 
   const headers = new Headers(c.req.raw.headers);
   headers.set("X-Verified-Email", email);
