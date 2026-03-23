@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { resolve } from "node:path";
@@ -79,6 +79,28 @@ function run(cmd: string, args: string[], opts?: { input?: string; cwd?: string;
       child.stdin!.write(opts.input);
       child.stdin!.end();
     }
+  });
+}
+
+function getRepoRoot(): string {
+  return resolve(import.meta.dirname, "../../..");
+}
+
+function runInteractive(cmd: string, args: string[], opts?: { cwd?: string }): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(cmd, args, {
+      cwd: opts?.cwd,
+      stdio: "inherit",
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+      reject(new Error(`${cmd} exited with code ${code}`));
+    });
   });
 }
 
@@ -656,6 +678,28 @@ async function ensureCloudflaredForCli(): Promise<void> {
   console.log(`  ${dim(cloudflaredInstallUrl)}`);
 }
 
+async function maybeInstallAgentSkill(cliCmd: string): Promise<void> {
+  console.log();
+  if (!(await confirm("Install the sharehtml agent skill for supported coding agents?"))) {
+    return;
+  }
+
+  try {
+    if (cliCmd === "sharehtml") {
+      await runInteractive("sharehtml", ["skill", "install"]);
+    } else {
+      await runInteractive("pnpm", ["sharehtml", "skill", "install"], { cwd: getRepoRoot() });
+    }
+  } catch (error: unknown) {
+    console.log();
+    console.log(`  ${dim("Skill install did not complete.")}`);
+    console.log(`  ${dim("You can install it later with:")} ${cliCmd} skill install`);
+    if (error instanceof Error) {
+      console.log(`  ${dim(error.message)}`);
+    }
+  }
+}
+
 async function main() {
   console.log();
   console.log(`  ${bold("sharehtml")} setup`);
@@ -891,6 +935,8 @@ async function main() {
   if (useAccess) {
     await ensureCloudflaredForCli();
   }
+
+  await maybeInstallAgentSkill(cliCmd);
 
   // Done
   console.log();

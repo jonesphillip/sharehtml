@@ -7,6 +7,7 @@ import { deleteCmd } from "./commands/delete.js";
 import { pullCmd } from "./commands/pull.js";
 import { diffCmd } from "./commands/diff.js";
 import { commentsCmd } from "./commands/comments.js";
+import { skillCmd } from "./commands/skill.js";
 import { configCmd } from "./commands/config.js";
 import { loginCmd } from "./commands/login.js";
 import { shareCmd } from "./commands/share.js";
@@ -28,6 +29,7 @@ program.addCommand(diffCmd);
 program.addCommand(commentsCmd);
 program.addCommand(shareCmd);
 program.addCommand(unshareCmd);
+program.addCommand(skillCmd);
 program.addCommand(configCmd);
 program.addCommand(loginCmd);
 
