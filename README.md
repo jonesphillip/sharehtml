@@ -113,6 +113,7 @@ Browser ◄┘──► Durable Objects
 | `sharehtml open <id>` | Open a document in the browser |
 | `sharehtml pull <id>` | Download a document locally |
 | `sharehtml diff <file>` | Compare local file against the deployed version |
+| `sharehtml comments <id>` | Show unresolved comments for a document |
 | `sharehtml delete <id>` | Delete a document |
 | `sharehtml share <document>` | Share by link, or `--add`/`--remove` emails |
 | `sharehtml unshare <document>` | Make a document private |

@@ -566,4 +566,44 @@ api.delete("/documents/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+api.get("/documents/:id/comments", async (c) => {
+  const id = c.req.param("id");
+  const email = c.get("authUser").email;
+  const registry = getRegistry(c.env);
+  const doc = await registry.getDocument(id);
+  if (!doc) {
+    return c.json({ error: "not found" }, 404);
+  }
+
+  // Shared users can view comments, not just the owner
+  const isOwner = doc.owner_email === email;
+  const isLinkShared = doc.is_shared === 1;
+  const isEmailShared = doc.is_shared === 2 &&
+    (await registry.getSharedEmails(id)).includes(email.toLowerCase());
+  if (!isOwner && !isLinkShared && !isEmailShared) {
+    return c.json({ error: "not found" }, 404);
+  }
+
+  const documentDoId = c.env.DOCUMENT_DO.idFromName(id);
+  const documentDo = c.env.DOCUMENT_DO.get(documentDoId);
+  const response = await documentDo.fetch(new Request(`http://do/${id}/comments`));
+  if (!response.ok) {
+    return c.json({ error: "failed to fetch comments" }, 500);
+  }
+
+  const data: unknown = await response.json();
+  const comments = isRecord(data) && Array.isArray(data.comments) ? data.comments : [];
+
+  return c.json({
+    document: {
+      id: doc.id,
+      title: doc.title,
+      filename: doc.filename,
+      owner_email: doc.owner_email,
+      is_shared: doc.is_shared,
+    },
+    comments,
+  });
+});
+
 export { api };

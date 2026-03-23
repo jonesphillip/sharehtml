@@ -329,6 +329,38 @@ export async function downloadDocumentSource(id: string): Promise<{
   return { filename, content, sourceKind, sourceLanguage };
 }
 
+export interface DocumentComment {
+  id: string;
+  document_id: string;
+  author_email: string;
+  author_name: string;
+  author_color: string;
+  content: string;
+  anchor: { selectors: Array<{ type: string; exact?: string }> } | null;
+  parent_id: string | null;
+  resolved: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentCommentsResponse {
+  document: {
+    id: string;
+    title: string;
+    filename: string;
+    owner_email: string;
+    is_shared: number;
+  };
+  comments: DocumentComment[];
+}
+
+export async function getDocumentComments(id: string): Promise<DocumentCommentsResponse> {
+  const resp = await requestWithAccess("Fetch comments", {
+    path: `/api/documents/${id}/comments`,
+  });
+  return parseJson<DocumentCommentsResponse>(resp, "Fetch comments");
+}
+
 export function getDocumentUrl(id: string): string {
   const { workerUrl } = getClient();
   return `${workerUrl}/d/${id}`;

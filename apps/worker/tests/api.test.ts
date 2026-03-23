@@ -187,4 +187,15 @@ describe("Document API", () => {
   });
 
 
+  it("returns comments for a document", async () => {
+    const uploadRes = await upload("comments-test.html", html, "Comments Test");
+    const doc = await uploadRes.json<{ id: string }>();
+
+    const res = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/comments`);
+    expect(res.status).toBe(200);
+    const body = await res.json<{ document: { id: string; title: string }; comments: unknown[] }>();
+    expect(body.document.id).toBe(doc.id);
+    expect(body.document.title).toBe("Comments Test");
+    expect(Array.isArray(body.comments)).toBe(true);
+  });
 });
