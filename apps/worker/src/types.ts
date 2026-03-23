@@ -1,5 +1,10 @@
 export type AuthMode = Env["AUTH_MODE"];
 export type ShareMode = "private" | "link" | "emails";
+export type SourceKind = "html" | "markdown" | "code";
+
+export function isSourceKind(value: unknown): value is SourceKind {
+  return value === "html" || value === "markdown" || value === "code";
+}
 
 export function isShareMode(value: unknown): value is ShareMode {
   return value === "private" || value === "link" || value === "emails";
@@ -29,6 +34,10 @@ export type DocumentRow = {
   owner_email: string;
   is_shared: number;
   created_at: string;
+  rendered_filename: string | null;
+  source_filename: string | null;
+  source_kind: string | null;
+  source_language: string | null;
 };
 
 export type RecentViewRow = {

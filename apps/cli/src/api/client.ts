@@ -4,6 +4,8 @@ import { getAuthHeaders } from "../auth/access.js";
 import { getConfig, isConfigured } from "../config/store.js";
 import {
   defaultDocumentTitleFromFilename,
+  getCodeLanguage,
+  getSourceKind,
   isCodeFile,
   isMarkdownFile,
   renderCodeToHtml,
@@ -28,6 +30,10 @@ interface DocumentMeta {
   owner_email: string;
   is_shared?: number;
   created_at: string;
+  rendered_filename?: string | null;
+  source_filename?: string | null;
+  source_kind?: string | null;
+  source_language?: string | null;
 }
 
 interface AuthContext {
@@ -46,31 +52,54 @@ function getClient(): { workerUrl: string } {
   return getConfig();
 }
 
-async function prepareUpload(
+export async function prepareDocumentUpload(
   filePath: string,
   title?: string,
-): Promise<{ blob: Blob; filename: string }> {
+): Promise<{
+  renderedBlob: Blob;
+  renderedFilename: string;
+  sourceBlob: Blob;
+  sourceFilename: string;
+  sourceKind: string;
+  sourceLanguage?: string;
+}> {
   const fileBuffer = await readFile(filePath);
-  let filename = basename(filePath);
+  const sourceFilename = basename(filePath);
+  const sourceKind = getSourceKind(sourceFilename);
+  const sourceLanguage = isCodeFile(sourceFilename) ? getCodeLanguage(sourceFilename) || undefined : undefined;
+  const sourceMimeType = sourceKind === "html"
+    ? "text/html"
+    : sourceKind === "markdown"
+    ? "text/markdown"
+    : "text/plain";
+  const sourceBlob = new Blob([fileBuffer], { type: sourceMimeType });
 
-  let blob: Blob;
-  if (isMarkdownFile(filename)) {
+  let renderedFilename = sourceFilename;
+  let renderedBlob: Blob;
+  if (isMarkdownFile(sourceFilename)) {
     const mdText = fileBuffer.toString("utf-8");
-    const mdTitle = title || defaultDocumentTitleFromFilename(filename);
+    const mdTitle = title || defaultDocumentTitleFromFilename(sourceFilename);
     const html = renderMarkdownToHtml(mdText, mdTitle, filePath);
-    blob = new Blob([html], { type: "text/html" });
-    filename = renderedFilenameToHtml(filename);
-  } else if (isCodeFile(filename)) {
+    renderedBlob = new Blob([html], { type: "text/html" });
+    renderedFilename = renderedFilenameToHtml(sourceFilename);
+  } else if (isCodeFile(sourceFilename)) {
     const codeText = fileBuffer.toString("utf-8");
-    const codeTitle = title || defaultDocumentTitleFromFilename(filename);
-    const html = renderCodeToHtml(codeText, codeTitle, filename);
-    blob = new Blob([html], { type: "text/html" });
-    filename = renderedFilenameToHtml(filename);
+    const codeTitle = title || defaultDocumentTitleFromFilename(sourceFilename);
+    const html = renderCodeToHtml(codeText, codeTitle, sourceFilename);
+    renderedBlob = new Blob([html], { type: "text/html" });
+    renderedFilename = renderedFilenameToHtml(sourceFilename);
   } else {
-    blob = new Blob([fileBuffer], { type: "text/html" });
+    renderedBlob = new Blob([fileBuffer], { type: "text/html" });
   }
 
-  return { blob, filename };
+  return {
+    renderedBlob,
+    renderedFilename,
+    sourceBlob,
+    sourceFilename,
+    sourceKind,
+    sourceLanguage,
+  };
 }
 
 function getLoginErrorMessage(canLogin: boolean): string {
@@ -140,29 +169,51 @@ async function requestWithAccess(
   return resp;
 }
 
+function buildUploadFormData(
+  prepared: Awaited<ReturnType<typeof prepareDocumentUpload>>,
+  title?: string,
+): FormData {
+  const formData = new FormData();
+  formData.append("file", prepared.renderedBlob, prepared.renderedFilename);
+  formData.append("source", prepared.sourceBlob, prepared.sourceFilename);
+  formData.append("sourceKind", prepared.sourceKind);
+  if (prepared.sourceLanguage) {
+    formData.append("sourceLanguage", prepared.sourceLanguage);
+  }
+  if (title) formData.append("title", title);
+  return formData;
+}
+
 export async function deployDocument(
   filePath: string,
   title?: string,
 ): Promise<DeployResult> {
-  const { blob, filename } = await prepareUpload(filePath, title);
-
-  const formData = new FormData();
-  formData.append("file", blob, filename);
-  if (title) formData.append("title", title);
-
+  const prepared = await prepareDocumentUpload(filePath, title);
   const resp = await requestWithAccess("Upload", {
     path: "/api/documents",
     method: "POST",
-    body: formData,
+    body: buildUploadFormData(prepared, title),
   });
   return parseJson<DeployResult>(resp, "Upload");
 }
 
-export async function findDocumentByFilename(filename: string): Promise<DocumentMeta | null> {
+export async function findDocumentByFilename(
+  filename: string,
+  match: "source" | "rendered" | "any" = "any",
+): Promise<DocumentMeta | null> {
   const resp = await requestWithAccess("Lookup", {
-    path: `/api/documents/by-filename?filename=${encodeURIComponent(filename)}`,
+    path:
+      `/api/documents/by-filename?filename=${encodeURIComponent(filename)}&match=${encodeURIComponent(match)}`,
   });
   const data = await parseJson<{ document: DocumentMeta | null }>(resp, "Lookup");
+  return data.document;
+}
+
+export async function getDocument(id: string): Promise<DocumentMeta> {
+  const resp = await requestWithAccess("Fetch document", {
+    path: `/api/documents/${id}`,
+  });
+  const data = await parseJson<{ document: DocumentMeta }>(resp, "Fetch document");
   return data.document;
 }
 
@@ -171,16 +222,11 @@ export async function updateDocument(
   filePath: string,
   title?: string,
 ): Promise<DeployResult> {
-  const { blob, filename } = await prepareUpload(filePath, title);
-
-  const formData = new FormData();
-  formData.append("file", blob, filename);
-  if (title) formData.append("title", title);
-
+  const prepared = await prepareDocumentUpload(filePath, title);
   const resp = await requestWithAccess("Update", {
     path: `/api/documents/${id}`,
     method: "PUT",
-    body: formData,
+    body: buildUploadFormData(prepared, title),
   });
   return parseJson<DeployResult>(resp, "Update");
 }
@@ -220,17 +266,67 @@ export async function getDocumentSharing(id: string): Promise<ShareState> {
   return parseJson<ShareState>(resp, "Get sharing");
 }
 
-export async function downloadDocument(id: string): Promise<{ filename: string; content: Uint8Array }> {
-  const resp = await requestWithAccess("Download", {
-    path: `/api/documents/${id}/raw`,
-  });
-
+function parseDownloadFilename(resp: Response, fallback: string): string {
   const disposition = resp.headers.get("Content-Disposition") || "";
-  const filenameMatch = disposition.match(/filename="(.+)"/);
-  const filename = filenameMatch?.[1] || `${id}.html`;
+  const match = disposition.match(/filename="(.+)"/);
+  return match?.[1] || fallback;
+}
+
+export async function downloadDocument(
+  id: string,
+  format: "default" | "source" | "rendered" = "default",
+): Promise<{ filename: string; content: Uint8Array }> {
+  const path = format === "source"
+    ? `/api/documents/${id}/source`
+    : format === "rendered"
+    ? `/api/documents/${id}/rendered`
+    : `/api/documents/${id}/raw`;
+  let resp: Response;
+  try {
+    resp = await requestWithAccess("Download", { path });
+  } catch (error) {
+    if (
+      format === "source" &&
+      error instanceof Error &&
+      error.message.includes("source unavailable")
+    ) {
+      throw new Error(
+        "Original source is not available for this document. Redeploy it once with a newer sharehtml CLI to enable source downloads.",
+      );
+    }
+    throw error;
+  }
+
+  const filename = parseDownloadFilename(resp, `${id}.html`);
   const content = new Uint8Array(await resp.arrayBuffer());
 
   return { filename, content };
+}
+
+export async function downloadDocumentSource(id: string): Promise<{
+  filename: string;
+  content: Uint8Array;
+  sourceKind: string;
+  sourceLanguage: string;
+}> {
+  let resp: Response;
+  try {
+    resp = await requestWithAccess("Download source", {
+      path: `/api/documents/${id}/source`,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("source unavailable")) {
+      throw new Error("source unavailable");
+    }
+    throw error;
+  }
+
+  const filename = parseDownloadFilename(resp, `${id}.txt`);
+  const content = new Uint8Array(await resp.arrayBuffer());
+  const sourceKind = resp.headers.get("X-ShareHTML-Source-Kind") || "html";
+  const sourceLanguage = resp.headers.get("X-ShareHTML-Source-Language") || "";
+
+  return { filename, content, sourceKind, sourceLanguage };
 }
 
 export function getDocumentUrl(id: string): string {

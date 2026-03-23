@@ -57,6 +57,7 @@ export class RegistryDO extends DurableObject<Env> {
       )
     `);
     this.ensureDocumentSharingColumn();
+    this.ensureDocumentArtifactColumns();
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS shared_emails (
         doc_id TEXT NOT NULL,
@@ -74,6 +75,27 @@ export class RegistryDO extends DurableObject<Env> {
 
     // Existing deployments treated every document as link-shareable.
     this.sql.exec("ALTER TABLE documents ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 1");
+  }
+
+  private ensureDocumentArtifactColumns() {
+    const columns = this.sql.exec<{ name: string }>("PRAGMA table_info(documents)").toArray();
+    const columnNames = new Set(columns.map((column) => column.name));
+
+    if (!columnNames.has("rendered_filename")) {
+      this.sql.exec("ALTER TABLE documents ADD COLUMN rendered_filename TEXT");
+    }
+
+    if (!columnNames.has("source_filename")) {
+      this.sql.exec("ALTER TABLE documents ADD COLUMN source_filename TEXT");
+    }
+
+    if (!columnNames.has("source_kind")) {
+      this.sql.exec("ALTER TABLE documents ADD COLUMN source_kind TEXT");
+    }
+
+    if (!columnNames.has("source_language")) {
+      this.sql.exec("ALTER TABLE documents ADD COLUMN source_language TEXT");
+    }
   }
 
   private pickColor(): string {
@@ -111,15 +133,23 @@ export class RegistryDO extends DurableObject<Env> {
     size: number;
     owner_email: string;
     is_shared: number;
+    rendered_filename?: string | null;
+    source_filename?: string | null;
+    source_kind?: string | null;
+    source_language?: string | null;
   }) {
     this.sql.exec(
-      "INSERT INTO documents (id, title, filename, size, owner_email, is_shared) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO documents (id, title, filename, size, owner_email, is_shared, rendered_filename, source_filename, source_kind, source_language) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       doc.id,
       doc.title,
       doc.filename,
       doc.size,
       doc.owner_email,
       doc.is_shared,
+      doc.rendered_filename ?? null,
+      doc.source_filename ?? null,
+      doc.source_kind ?? null,
+      doc.source_language ?? null,
     );
   }
 
@@ -186,23 +216,57 @@ export class RegistryDO extends DurableObject<Env> {
     };
   }
 
-  async getDocumentByFilename(filename: string, ownerEmail: string): Promise<DocumentRow | null> {
+  async getDocumentByFilename(
+    filename: string,
+    ownerEmail: string,
+    match: "source" | "rendered" | "any" = "any",
+  ): Promise<DocumentRow | null> {
+    let whereClause = "";
+    const parameters: string[] = [ownerEmail];
+
+    if (match === "source") {
+      whereClause = "source_filename = ? OR (source_filename IS NULL AND filename = ?)";
+      parameters.push(filename, filename);
+    } else if (match === "rendered") {
+      whereClause = "rendered_filename = ? OR (rendered_filename IS NULL AND filename = ?)";
+      parameters.push(filename, filename);
+    } else {
+      whereClause = "filename = ? OR rendered_filename = ? OR source_filename = ?";
+      parameters.push(filename, filename, filename);
+    }
+
     const rows = this.sql
       .exec<DocumentRow>(
-        "SELECT * FROM documents WHERE filename = ? AND owner_email = ? LIMIT 1",
-        filename,
-        ownerEmail,
+        `SELECT * FROM documents
+         WHERE owner_email = ?
+           AND (${whereClause})
+         LIMIT 1`,
+        ...parameters,
       )
       .toArray();
     return rows.length > 0 ? rows[0] : null;
   }
 
-  async updateDocument(id: string, updates: { title: string; filename: string; size: number }) {
+  async updateDocument(id: string, updates: {
+    title: string;
+    filename: string;
+    size: number;
+    rendered_filename?: string | null;
+    source_filename?: string | null;
+    source_kind?: string | null;
+    source_language?: string | null;
+  }) {
     this.sql.exec(
-      "UPDATE documents SET title = ?, filename = ?, size = ? WHERE id = ?",
+      `UPDATE documents
+       SET title = ?, filename = ?, size = ?, rendered_filename = ?, source_filename = ?, source_kind = ?, source_language = ?
+       WHERE id = ?`,
       updates.title,
       updates.filename,
       updates.size,
+      updates.rendered_filename ?? null,
+      updates.source_filename ?? null,
+      updates.source_kind ?? null,
+      updates.source_language ?? null,
       id,
     );
   }

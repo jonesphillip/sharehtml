@@ -4,7 +4,6 @@ import { resolve } from "node:path";
 import { downloadDocument } from "../api/client.js";
 
 function extractId(idOrUrl: string): string {
-  // Support full URLs like https://example.com/d/abc123
   const urlMatch = idOrUrl.match(/\/d\/([a-z0-9]+)/);
   if (urlMatch) return urlMatch[1];
   return idOrUrl;

@@ -1,10 +1,80 @@
 import { Hono } from "hono";
-import { isRecord, isShareMode, parseDocumentSnapshot, shareModeFromInt, shareModeToInt, type AppBindings, type DocumentSnapshot, type ShareMode } from "../types.js";
+import { isRecord, isShareMode, isSourceKind, parseDocumentSnapshot, shareModeFromInt, shareModeToInt, type AppBindings, type DocumentSnapshot, type ShareMode, type SourceKind } from "../types.js";
 import { nanoid } from "../utils/ids.js";
 import { getRegistry } from "../utils/registry.js";
 import { extractDocumentTextFromHtml } from "../utils/document-text.js";
+import {
+  getLegacyDocumentKey,
+  getRenderedDocumentKey,
+  getRenderedObject,
+  getSourceDocumentKey,
+  getSourceObject,
+} from "../utils/document-storage.js";
 
 const api = new Hono<AppBindings>();
+
+function inferSourceKind(filename: string): SourceKind {
+  if (/\.(md|markdown)$/i.test(filename)) {
+    return "markdown";
+  }
+
+  if (/\.[^.]+$/i.test(filename) && !/\.(html?)$/i.test(filename)) {
+    return "code";
+  }
+
+  return "html";
+}
+
+function getDocumentTitle(filename: string, title: string | null, sourceKind?: SourceKind | null): string {
+  if (title) {
+    return title;
+  }
+
+  const resolvedKind = sourceKind || inferSourceKind(filename);
+  if (resolvedKind === "markdown") {
+    return filename.replace(/\.(md|markdown)$/i, "");
+  }
+
+  if (resolvedKind === "code") {
+    return filename.replace(/\.[^.]+$/i, "");
+  }
+
+  return filename.replace(/\.(html?)$/i, "");
+}
+
+function sanitizeDownloadFilename(filename: string): string {
+  return filename.replace(/["\\]/g, "_");
+}
+
+function getSourceMimeType(kind: SourceKind): string {
+  if (kind === "html") {
+    return "text/html; charset=utf-8";
+  }
+
+  if (kind === "markdown") {
+    return "text/markdown; charset=utf-8";
+  }
+
+  return "text/plain; charset=utf-8";
+}
+
+function narrowSourceKind(value: string | null): SourceKind {
+  return isSourceKind(value) ? value : "html";
+}
+
+function parseSourceFields(formData: FormData): {
+  source: File | null;
+  sourceKind: SourceKind | null;
+  sourceLanguage: string | null;
+} {
+  const rawSource = formData.get("source");
+  const source = rawSource instanceof File ? rawSource : null;
+  const rawSourceKind = formData.get("sourceKind");
+  const sourceKind = isSourceKind(rawSourceKind) ? rawSourceKind : null;
+  const rawSourceLanguage = formData.get("sourceLanguage");
+  const sourceLanguage = typeof rawSourceLanguage === "string" ? rawSourceLanguage : null;
+  return { source, sourceKind, sourceLanguage };
+}
 
 async function migrateDocumentAnchors(
   documentDo: DurableObjectStub,
@@ -50,7 +120,6 @@ async function restoreDocumentSnapshot(
   }
 }
 
-// Upload a document
 api.post("/documents", async (c) => {
   const ownerEmail = c.get("authUser").email;
   const formData = await c.req.formData();
@@ -58,32 +127,48 @@ api.post("/documents", async (c) => {
   const file = rawFile instanceof File ? rawFile : null;
   const rawTitle = formData.get("title");
   const title = typeof rawTitle === "string" ? rawTitle : null;
+  const { source, sourceKind, sourceLanguage } = parseSourceFields(formData);
 
   if (!file) {
     return c.json({ error: "file is required" }, 400);
   }
 
   const id = nanoid();
-  const filename = file.name || "document.html";
-  const resolvedTitle = title || filename.replace(/\.(html?|md|markdown)$/i, "");
+  const renderedFilename = file.name || "document.html";
+  const sourceFilename = source?.name || renderedFilename;
+  const resolvedTitle = getDocumentTitle(sourceFilename, title, sourceKind);
 
   const registry = getRegistry(c.env);
 
-  // Store in R2 and register in parallel
-  await Promise.all([
-    c.env.DOCUMENTS_BUCKET.put(`${id}/${filename}`, file.stream(), {
+  const writes: Array<Promise<unknown>> = [
+    c.env.DOCUMENTS_BUCKET.put(getRenderedDocumentKey(id, renderedFilename), file.stream(), {
       httpMetadata: { contentType: "text/html" },
       customMetadata: { title: resolvedTitle, ownerEmail },
     }),
     registry.createDocument({
       id,
       title: resolvedTitle,
-      filename,
+      filename: sourceFilename,
       size: file.size,
       owner_email: ownerEmail,
       is_shared: c.env.AUTH_MODE === "access" ? 0 : 1,
+      rendered_filename: renderedFilename,
+      source_filename: source && sourceKind ? sourceFilename : null,
+      source_kind: sourceKind,
+      source_language: sourceLanguage,
     }),
-  ]);
+  ];
+
+  if (source && sourceKind) {
+    writes.push(
+      c.env.DOCUMENTS_BUCKET.put(getSourceDocumentKey(id, sourceFilename), source.stream(), {
+        httpMetadata: { contentType: getSourceMimeType(sourceKind) },
+        customMetadata: { title: resolvedTitle, ownerEmail, sourceKind },
+      }),
+    );
+  }
+
+  await Promise.all(writes);
 
   const url = new URL(c.req.url);
   const docUrl = `${url.origin}/d/${id}`;
@@ -92,21 +177,29 @@ api.post("/documents", async (c) => {
     id,
     url: docUrl,
     title: resolvedTitle,
-    filename,
+    filename: sourceFilename,
     size: file.size,
     isShared: c.env.AUTH_MODE !== "access",
   });
 });
 
-// Find document by filename (owner resolved from token)
 api.get("/documents/by-filename", async (c) => {
   const filename = c.req.query("filename");
   if (!filename) {
     return c.json({ error: "filename required" }, 400);
   }
+  const match = c.req.query("match");
+  let matchMode: "source" | "rendered" | "any" = "any";
+  if (match) {
+    if (match === "source" || match === "rendered" || match === "any") {
+      matchMode = match;
+    } else {
+      return c.json({ error: "match must be source, rendered, or any" }, 400);
+    }
+  }
   const owner = c.get("authUser").email;
   const registry = getRegistry(c.env);
-  const doc = await registry.getDocumentByFilename(filename, owner);
+  const doc = await registry.getDocumentByFilename(filename, owner, matchMode);
   return c.json({ document: doc });
 });
 
@@ -145,7 +238,6 @@ api.get("/documents", async (c) => {
   });
 });
 
-// Download raw document content
 api.get("/documents/:id/raw", async (c) => {
   const id = c.req.param("id");
   const registry = getRegistry(c.env);
@@ -154,15 +246,69 @@ api.get("/documents/:id/raw", async (c) => {
     return c.json({ error: "not found" }, 404);
   }
 
-  const object = await c.env.DOCUMENTS_BUCKET.get(`${id}/${doc.filename}`);
+  const sourceObject = await getSourceObject(c.env.DOCUMENTS_BUCKET, id, doc);
+  const renderedObject = sourceObject ? null : await getRenderedObject(c.env.DOCUMENTS_BUCKET, id, doc);
+  const object = sourceObject || renderedObject;
   if (!object) {
     return c.json({ error: "file not found in storage" }, 404);
   }
 
+  const downloadFilename = sourceObject && doc.source_filename
+    ? doc.source_filename
+    : doc.filename;
+  const contentType = sourceObject
+    ? getSourceMimeType(narrowSourceKind(doc.source_kind))
+    : "text/html; charset=utf-8";
+
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": contentType,
+      "Content-Disposition": `attachment; filename="${sanitizeDownloadFilename(downloadFilename)}"`,
+    },
+  });
+});
+
+api.get("/documents/:id/source", async (c) => {
+  const id = c.req.param("id");
+  const registry = getRegistry(c.env);
+  const doc = await registry.getDocument(id);
+  if (!doc || doc.owner_email !== c.get("authUser").email) {
+    return c.json({ error: "not found" }, 404);
+  }
+
+  const object = await getSourceObject(c.env.DOCUMENTS_BUCKET, id, doc);
+  if (!object || !doc.source_filename) {
+    return c.json({ error: "source unavailable" }, 404);
+  }
+
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": getSourceMimeType(narrowSourceKind(doc.source_kind)),
+      "Content-Disposition": `attachment; filename="${sanitizeDownloadFilename(doc.source_filename)}"`,
+      "X-ShareHTML-Source-Kind": doc.source_kind || "html",
+      "X-ShareHTML-Source-Language": doc.source_language || "",
+    },
+  });
+});
+
+api.get("/documents/:id/rendered", async (c) => {
+  const id = c.req.param("id");
+  const registry = getRegistry(c.env);
+  const doc = await registry.getDocument(id);
+  if (!doc || doc.owner_email !== c.get("authUser").email) {
+    return c.json({ error: "not found" }, 404);
+  }
+
+  const object = await getRenderedObject(c.env.DOCUMENTS_BUCKET, id, doc);
+  if (!object) {
+    return c.json({ error: "file not found in storage" }, 404);
+  }
+
+  const renderedFilename = doc.rendered_filename || doc.filename;
   return new Response(object.body, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Disposition": `attachment; filename="${doc.filename.replace(/["\\]/g, "_")}"`,
+      "Content-Disposition": `attachment; filename="${sanitizeDownloadFilename(renderedFilename)}"`,
     },
   });
 });
@@ -178,7 +324,6 @@ api.get("/documents/:id", async (c) => {
   return c.json({ document: doc });
 });
 
-// Update document
 api.put("/documents/:id", async (c) => {
   const id = c.req.param("id");
   const formData = await c.req.formData();
@@ -186,13 +331,14 @@ api.put("/documents/:id", async (c) => {
   const file = rawFile instanceof File ? rawFile : null;
   const rawTitle = formData.get("title");
   const title = typeof rawTitle === "string" ? rawTitle : null;
+  const { source, sourceKind, sourceLanguage } = parseSourceFields(formData);
 
   if (!file) {
     return c.json({ error: "file is required" }, 400);
   }
 
-  const filename = file.name || "document.html";
-  const resolvedTitle = title || filename.replace(/\.(html?|md|markdown)$/i, "");
+  const renderedFilename = file.name || "document.html";
+  const sourceFilename = source?.name || renderedFilename;
   const nextHtml = await file.text();
 
   const registry = getRegistry(c.env);
@@ -206,13 +352,32 @@ api.put("/documents/:id", async (c) => {
     return c.json({ error: "forbidden" }, 403);
   }
 
-  const currentObject = await c.env.DOCUMENTS_BUCKET.get(`${id}/${meta.filename}`);
+  const existingSourceKind = isSourceKind(meta.source_kind) ? meta.source_kind : null;
+  const resolvedTitle = getDocumentTitle(sourceFilename, title, sourceKind || existingSourceKind);
+
+  const currentObject = await getRenderedObject(c.env.DOCUMENTS_BUCKET, id, meta);
   const currentHtml = currentObject ? await currentObject.text() : null;
   const documentDoId = c.env.DOCUMENT_DO.idFromName(id);
   const documentDo = c.env.DOCUMENT_DO.get(documentDoId);
-  const oldKey = `${id}/${meta.filename}`;
-  const finalKey = `${id}/${filename}`;
-  const tempKey = `${id}/.__pending__.${Date.now()}.${filename}`;
+  const oldRenderedFilename = meta.rendered_filename || meta.filename;
+  const oldRenderedKey = meta.rendered_filename
+    ? getRenderedDocumentKey(id, oldRenderedFilename)
+    : getLegacyDocumentKey(id, oldRenderedFilename);
+  const oldSourceKey = meta.source_filename
+    ? getSourceDocumentKey(id, meta.source_filename)
+    : null;
+  const finalRenderedKey = getRenderedDocumentKey(id, renderedFilename);
+  const nextSourceFilename = source && sourceKind
+    ? sourceFilename
+    : meta.source_filename || null;
+  const nextSourceKind = source && sourceKind
+    ? sourceKind
+    : meta.source_kind || null;
+  const nextSourceLanguage = source && sourceKind
+    ? sourceLanguage
+    : meta.source_language || null;
+  const finalSourceKey = nextSourceFilename ? getSourceDocumentKey(id, nextSourceFilename) : null;
+  const tempKey = `${id}/.__pending__.${Date.now()}.${renderedFilename}`;
 
   let oldText: string | null = null;
   let newText: string | null = null;
@@ -238,15 +403,39 @@ api.put("/documents/:id", async (c) => {
       didMigrateAnchors = true;
     }
 
-    await c.env.DOCUMENTS_BUCKET.put(finalKey, nextHtml, {
-      httpMetadata: { contentType: "text/html" },
-      customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email },
-    });
-    await registry.updateDocument(id, { title: resolvedTitle, filename, size: file.size });
-
-    if (oldKey !== finalKey) {
-      await c.env.DOCUMENTS_BUCKET.delete(oldKey);
+    const r2Writes: Array<Promise<unknown>> = [
+      c.env.DOCUMENTS_BUCKET.put(finalRenderedKey, nextHtml, {
+        httpMetadata: { contentType: "text/html" },
+        customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email },
+      }),
+    ];
+    if (source && sourceKind && finalSourceKey) {
+      r2Writes.push(
+        c.env.DOCUMENTS_BUCKET.put(finalSourceKey, source.stream(), {
+          httpMetadata: { contentType: getSourceMimeType(sourceKind) },
+          customMetadata: { title: resolvedTitle, ownerEmail: meta.owner_email, sourceKind },
+        }),
+      );
     }
+    await Promise.all(r2Writes);
+    await registry.updateDocument(id, {
+      title: resolvedTitle,
+      filename: nextSourceFilename || sourceFilename,
+      size: file.size,
+      rendered_filename: renderedFilename,
+      source_filename: nextSourceFilename,
+      source_kind: nextSourceKind,
+      source_language: nextSourceLanguage,
+    });
+
+    const cleanupDeletes: Array<Promise<void>> = [];
+    if (oldRenderedKey !== finalRenderedKey) {
+      cleanupDeletes.push(c.env.DOCUMENTS_BUCKET.delete(oldRenderedKey));
+    }
+    if (oldSourceKey && oldSourceKey !== finalSourceKey) {
+      cleanupDeletes.push(c.env.DOCUMENTS_BUCKET.delete(oldSourceKey));
+    }
+    await Promise.all(cleanupDeletes);
   } catch (error) {
     if (didMigrateAnchors && snapshot) {
       try {
@@ -267,9 +456,9 @@ api.put("/documents/:id", async (c) => {
     id,
     url: docUrl,
     title: resolvedTitle,
-    filename,
+    filename: nextSourceFilename || sourceFilename,
     size: file.size,
-    isShared: meta.is_shared === 1,
+    isShared: Boolean(meta.is_shared),
   });
 });
 
@@ -358,10 +547,21 @@ api.delete("/documents/:id", async (c) => {
   }
 
   // Delete from R2 and registry in parallel
-  await Promise.all([
-    c.env.DOCUMENTS_BUCKET.delete(`${id}/${meta.filename}`),
+  const renderedFilename = meta.rendered_filename || meta.filename;
+  const renderedKey = meta.rendered_filename
+    ? getRenderedDocumentKey(id, renderedFilename)
+    : getLegacyDocumentKey(id, renderedFilename);
+  const sourceKey = meta.source_filename
+    ? getSourceDocumentKey(id, meta.source_filename)
+    : null;
+  const deletes: Array<Promise<unknown>> = [
+    c.env.DOCUMENTS_BUCKET.delete(renderedKey),
     registry.deleteDocument(id),
-  ]);
+  ];
+  if (sourceKey) {
+    deletes.push(c.env.DOCUMENTS_BUCKET.delete(sourceKey));
+  }
+  await Promise.all(deletes);
 
   return c.json({ ok: true });
 });

@@ -3,6 +3,7 @@ import { shareModeFromInt, type AppBindings, type DocumentRow } from "../types.j
 import { ShellView } from "../frontend/shell.js";
 import { getAssetUrls } from "../utils/assets.js";
 import { getRegistry } from "../utils/registry.js";
+import { getRenderedObject } from "../utils/document-storage.js";
 
 const viewer = new Hono<AppBindings>();
 
@@ -67,7 +68,7 @@ viewer.get("/d/:id/content", async (c) => {
   if (!result) return c.text("Not found", 404);
   const { doc } = result;
 
-  const obj = await c.env.DOCUMENTS_BUCKET.get(`${id}/${doc.filename}`);
+  const obj = await getRenderedObject(c.env.DOCUMENTS_BUCKET, id, doc);
 
   if (!obj) {
     return c.text("Content not found", 404);

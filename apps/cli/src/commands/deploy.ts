@@ -5,10 +5,12 @@ import { createInterface } from "node:readline";
 import {
   deployDocument,
   findDocumentByFilename,
+  getDocument,
   getDocumentUrl,
   updateDocument,
 } from "../api/client.js";
 import { deploymentRequiresLogin } from "../auth/capabilities.js";
+import { getDocumentMapping, removeDocumentMapping, setDocumentMapping } from "../config/store.js";
 import { updateDocumentSharing } from "./share-utils.js";
 import { renderedFilenameToHtml } from "../utils/document-render.js";
 
@@ -56,7 +58,24 @@ export const deployCmd = new Command("deploy")
 
       const filename = basename(filePath);
       const lookupFilename = renderedFilenameToHtml(filename);
-      const existing = await findDocumentByFilename(lookupFilename);
+      const mappedDocumentId = getDocumentMapping(filePath);
+      let existing = null;
+
+      if (mappedDocumentId) {
+        try {
+          existing = await getDocument(mappedDocumentId);
+        } catch {
+          removeDocumentMapping(filePath);
+        }
+      }
+
+      if (!existing) {
+        existing = await findDocumentByFilename(filename, "source");
+      }
+
+      if (!existing && lookupFilename !== filename) {
+        existing = await findDocumentByFilename(lookupFilename, "rendered");
+      }
 
       if (existing) {
         const existingUrl = getDocumentUrl(existing.id);
@@ -78,6 +97,7 @@ export const deployCmd = new Command("deploy")
           const updated = await updateDocumentSharing(existing.id, Boolean(opts.share));
           isShared = updated.isShared;
         }
+        setDocumentMapping(filePath, result.id);
         console.log(`\nUpdated! ${result.url}`);
         console.log(`  id:    ${result.id}`);
         console.log(`  title: ${result.title}`);
@@ -91,6 +111,7 @@ export const deployCmd = new Command("deploy")
           const updated = await updateDocumentSharing(result.id, Boolean(opts.share));
           isShared = updated.isShared;
         }
+        setDocumentMapping(filePath, result.id);
         console.log(`\nDeployed! ${result.url}`);
         console.log(`  id:    ${result.id}`);
         console.log(`  title: ${result.title}`);

@@ -57,6 +57,20 @@ export function isCodeFile(filename: string): boolean {
   return getCodeLanguage(filename) !== null;
 }
 
+export type SourceKind = "html" | "markdown" | "code";
+
+export function getSourceKind(filename: string): SourceKind {
+  if (isMarkdownFile(filename)) {
+    return "markdown";
+  }
+
+  if (isCodeFile(filename)) {
+    return "code";
+  }
+
+  return "html";
+}
+
 export function renderedFilenameToHtml(filename: string): string {
   if (isMarkdownFile(filename)) {
     return filename.replace(/\.(md|markdown)$/i, ".html");
@@ -210,7 +224,7 @@ ${getHighlightCss()}
 </html>`;
 }
 
-function getCodeLanguage(filename: string): string | null {
+export function getCodeLanguage(filename: string): string | null {
   const extension = extname(filename).toLowerCase();
   return CODE_LANGUAGE_BY_EXTENSION[extension] ?? null;
 }

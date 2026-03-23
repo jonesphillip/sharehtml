@@ -12,6 +12,25 @@ function upload(filename: string, content: string, title?: string) {
   });
 }
 
+function uploadWithSource(
+  renderedFilename: string,
+  renderedContent: string,
+  sourceFilename: string,
+  sourceContent: string,
+  sourceKind: string,
+  title?: string,
+) {
+  const form = new FormData();
+  form.append("file", new File([renderedContent], renderedFilename, { type: "text/html" }));
+  form.append("source", new File([sourceContent], sourceFilename, { type: "text/plain" }));
+  form.append("sourceKind", sourceKind);
+  if (title) form.append("title", title);
+  return exports.default.fetch("https://example.com/api/documents", {
+    method: "POST",
+    body: form,
+  });
+}
+
 describe("Document API", () => {
   it("uploads, lists, fetches, and deletes a document", async () => {
     const uploadRes = await upload("test.html", html, "Test Doc");
@@ -110,4 +129,62 @@ describe("Document API", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it("stores and retrieves source and rendered separately", async () => {
+    const md = "# Hello\n\nWorld";
+    const rendered = "<html><body><h1>Hello</h1><p>World</p></body></html>";
+    const res = await uploadWithSource("hello.html", rendered, "hello.md", md, "markdown", "Hello");
+    expect(res.status).toBe(200);
+    const doc = await res.json<{ id: string; filename: string }>();
+    expect(doc.filename).toBe("hello.md");
+
+    const sourceRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/source`);
+    expect(sourceRes.status).toBe(200);
+    expect(await sourceRes.text()).toBe(md);
+    expect(sourceRes.headers.get("X-ShareHTML-Source-Kind")).toBe("markdown");
+
+    const renderedRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/rendered`);
+    expect(renderedRes.status).toBe(200);
+    expect(await renderedRes.text()).toBe(rendered);
+
+    const rawRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/raw`);
+    expect(rawRes.status).toBe(200);
+    expect(await rawRes.text()).toBe(md);
+  });
+
+  it("returns source unavailable for legacy uploads", async () => {
+    const res = await upload("legacy.html", html, "Legacy");
+    const doc = await res.json<{ id: string }>();
+
+    const sourceRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/source`);
+    expect(sourceRes.status).toBe(404);
+    const body = await sourceRes.json<{ error: string }>();
+    expect(body.error).toBe("source unavailable");
+
+    const renderedRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/rendered`);
+    expect(renderedRes.status).toBe(200);
+    expect(await renderedRes.text()).toBe(html);
+  });
+
+  it("updates source on re-upload", async () => {
+    const res = await uploadWithSource("doc.html", html, "doc.ts", "const v1 = 1;", "code");
+    const doc = await res.json<{ id: string }>();
+
+    const form = new FormData();
+    form.append("file", new File(["<h1>v2</h1>"], "doc.html", { type: "text/html" }));
+    form.append("source", new File(["const v2 = 2;"], "doc.ts", { type: "text/plain" }));
+    form.append("sourceKind", "code");
+    await exports.default.fetch(`https://example.com/api/documents/${doc.id}`, {
+      method: "PUT",
+      body: form,
+    });
+
+    const sourceRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/source`);
+    expect(await sourceRes.text()).toBe("const v2 = 2;");
+
+    const renderedRes = await exports.default.fetch(`https://example.com/api/documents/${doc.id}/rendered`);
+    expect(await renderedRes.text()).toBe("<h1>v2</h1>");
+  });
+
+
 });
