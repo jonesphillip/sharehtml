@@ -5,6 +5,7 @@ import { authMiddleware } from "./utils/auth.js";
 import { api } from "./routes/api.js";
 import { viewer } from "./routes/viewer.js";
 import { HomeView } from "./frontend/home.js";
+import { createCapabilityToken } from "./utils/capability.js";
 import { getAssetUrls } from "./utils/assets.js";
 import { getRegistry } from "./utils/registry.js";
 
@@ -53,6 +54,11 @@ app.get("/", async (c) => {
 
   const workerUrl = `${url.protocol}//${url.host}`;
   const assets = await getAssetUrls(c.env.ASSETS);
+  const homeCapabilityToken = await createCapabilityToken(c.env, {
+    scope: "home",
+    email,
+    documentId: null,
+  });
   return c.html(
     HomeView({
       assets,
@@ -65,6 +71,7 @@ app.get("/", async (c) => {
       pageSize,
       totalCount: documentsPage.totalCount,
       requiresLogin: c.env.AUTH_MODE === "access",
+      homeCapabilityToken,
     }),
   );
 });

@@ -7,6 +7,7 @@
     "deploy": "pnpm --filter @sharehtml/worker run deploy",
     "build": "pnpm -r build",
     "test": "pnpm --filter @sharehtml/worker run test",
+    "test:e2e": "pnpm --filter @sharehtml/worker run e2e",
     "typecheck": "pnpm --filter @sharehtml/worker run typecheck",
     "setup": "pnpm --filter @sharehtml/worker run setup",
     "sharehtml": "pnpm --filter @sharehtml/cli exec sharehtml"

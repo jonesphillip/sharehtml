@@ -19,6 +19,12 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
       typeof event.origin === "string";
   }
 
+  function findLinkTarget(target: EventTarget | null): HTMLAnchorElement | null {
+    if (!(target instanceof Element)) return null;
+    const link = target.closest("a[href]");
+    return link instanceof HTMLAnchorElement ? link : null;
+  }
+
   // Styles for in-document elements
   const style = document.createElement("style");
   style.textContent = `
@@ -56,158 +62,6 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
       outline-offset: 2px;
       cursor: pointer;
     }
-    .selection-toolbar {
-      position: absolute;
-      display: flex;
-      align-items: center;
-      gap: 2px;
-      background: #000000;
-      border-radius: 4px;
-      box-shadow: 0 1px 4px rgba(0,0,0,0.10);
-      font-size: 12px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      padding: 2px;
-      z-index: 10000;
-      user-select: none;
-    }
-    .toolbar-btn {
-      color: #ffffff;
-      background: none;
-      border: none;
-      border-radius: 3px;
-      padding: 3px 8px;
-      cursor: pointer;
-      font-size: 12px;
-      font-family: inherit;
-      transition: background 120ms ease;
-      white-space: nowrap;
-    }
-    .toolbar-btn:hover { background: rgba(255,255,255,0.15); }
-    .toolbar-divider {
-      width: 1px;
-      height: 16px;
-      background: rgba(255,255,255,0.2);
-    }
-    .emoji-picker {
-      position: absolute;
-      background: #ffffff;
-      border: 1px solid #000000;
-      border-radius: 6px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.12);
-      padding: 8px;
-      z-index: 10001;
-      user-select: none;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .emoji-row {
-      display: flex;
-      gap: 2px;
-    }
-    .emoji-btn {
-      width: 32px;
-      height: 32px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border: none;
-      background: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 18px;
-      transition: background 120ms ease;
-    }
-    .emoji-btn:hover { background: #f5f5f5; }
-    .mobile-selection-bar {
-      display: none;
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      background: #000000;
-      padding: 12px 16px;
-      padding-bottom: calc(12px + env(safe-area-inset-bottom));
-      z-index: 10000;
-      gap: 8px;
-      align-items: center;
-      animation: slideUp 150ms ease;
-    }
-    .mobile-selection-bar.visible { display: flex; }
-    .mobile-selection-bar .toolbar-btn {
-      padding: 8px 14px;
-      font-size: 14px;
-    }
-    .mobile-selection-bar .toolbar-divider {
-      width: 1px;
-      height: 20px;
-      background: rgba(255,255,255,0.2);
-    }
-    .mobile-compose {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      width: 100%;
-    }
-    .mobile-compose-quote {
-      font-size: 12px;
-      color: rgba(255,255,255,0.5);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .mobile-compose-quote::before { content: "\\201C"; }
-    .mobile-compose-quote::after { content: "\\201D"; }
-    .mobile-compose-row {
-      display: flex;
-      gap: 8px;
-      align-items: flex-end;
-    }
-    .mobile-compose-input {
-      flex: 1;
-      background: rgba(255,255,255,0.1);
-      border: 1px solid rgba(255,255,255,0.2);
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-size: 16px;
-      font-family: inherit;
-      color: #ffffff;
-      outline: none;
-      resize: none;
-      min-height: 40px;
-      max-height: 120px;
-    }
-    .mobile-compose-input::placeholder { color: rgba(255,255,255,0.4); }
-    .mobile-compose-input:focus { border-color: rgba(255,255,255,0.4); }
-    .mobile-compose-send {
-      background: #ffffff;
-      color: #000000;
-      border: none;
-      border-radius: 8px;
-      padding: 10px 16px;
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      flex-shrink: 0;
-      opacity: 0.4;
-    }
-    .mobile-compose-send.active { opacity: 1; }
-    .mobile-compose-cancel {
-      background: none;
-      border: none;
-      color: rgba(255,255,255,0.5);
-      font-size: 13px;
-      cursor: pointer;
-      padding: 0;
-      align-self: flex-start;
-    }
-    @keyframes slideUp {
-      from { transform: translateY(100%); }
-      to { transform: translateY(0); }
-    }
-    @media (max-width: 768px) {
-      .emoji-btn { width: 40px; height: 40px; font-size: 22px; }
-    }
   `;
   document.head.appendChild(style);
 
@@ -215,8 +69,6 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
   overlayRoot.className = "collab-overlay-root";
   document.body.appendChild(overlayRoot);
 
-  let toolbar: HTMLElement | null = null;
-  let emojiPicker: HTMLElement | null = null;
   let activeHighlightId: string | null = null;
   let hoveredHighlightId: string | null = null;
   let hoveredAnnotatableElement: Element | null = null;
@@ -231,6 +83,15 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
     text: string;
     anchor: LocalAnchor;
     rect: DOMRect;
+    pixelY: number;
+  }
+
+  interface ViewportRectPayload {
+    top: number;
+    left: number;
+    bottom: number;
+    width: number;
+    height: number;
   }
 
   const remoteSelectionState = new Map<
@@ -241,16 +102,6 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
     }
   >();
   let currentSelection: LocalSelection | null = null;
-  const QUICK_EMOJI = [
-    "\u{1F44D}",
-    "\u{2764}\u{FE0F}",
-    "\u{1F602}",
-    "\u{1F389}",
-    "\u{1F440}",
-    "\u{1F525}",
-    "\u{1F64F}",
-    "\u{1F680}",
-  ];
 
   // Check parent window width — iframe may be narrower due to sidebar
   let parentWidth = window.innerWidth;
@@ -288,7 +139,9 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
     const startContainer =
       range.startContainer.nodeType === Node.TEXT_NODE
         ? range.startContainer.parentElement
-        : (range.startContainer as Element);
+        : range.startContainer instanceof Element
+        ? range.startContainer
+        : null;
     if (startContainer) {
       selectors.push({
         type: "CssSelector",
@@ -296,10 +149,18 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
       });
     }
 
+    const fragments = Array.from(range.getClientRects()).filter((fragment) =>
+      fragment.width > 0 && fragment.height > 0
+    );
+    const pixelY = fragments.length > 0
+      ? Math.min(...fragments.map((fragment) => fragment.top + window.scrollY))
+      : range.getBoundingClientRect().top + window.scrollY;
+
     return {
       text,
       anchor: { selectors },
       rect: range.getBoundingClientRect(),
+      pixelY,
     };
   }
 
@@ -339,6 +200,7 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
   function processElementSelection(
     element: HTMLImageElement | HTMLCanvasElement,
   ): LocalSelection {
+    const rect = element.getBoundingClientRect();
     const selectors: LocalSelector[] = [{
       type: "ElementSelector",
       cssSelector: getCssSelector(element),
@@ -353,8 +215,54 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
     return {
       text: getAnnotatableLabel(element),
       anchor: { selectors },
-      rect: element.getBoundingClientRect(),
+      rect,
+      pixelY: rect.top + window.scrollY,
     };
+  }
+
+  function serializeViewportRect(rect: DOMRect): ViewportRectPayload {
+    return {
+      top: rect.top,
+      left: rect.left,
+      bottom: rect.bottom,
+      width: rect.width,
+      height: rect.height,
+    };
+  }
+
+  function refreshCurrentSelection(): LocalSelection | null {
+    const textSelection = processSelection();
+    if (textSelection) {
+      currentSelection = textSelection;
+      return currentSelection;
+    }
+
+    if (!currentSelection) return null;
+
+    const element = findElementFromAnchor(currentSelection.anchor);
+    if (!element) {
+      currentSelection = null;
+      return null;
+    }
+
+    currentSelection = processElementSelection(element);
+    return currentSelection;
+  }
+
+  function emitCurrentSelection(type: "selection:made" | "selection:geometry" = "selection:made") {
+    const selection = refreshCurrentSelection();
+    if (!selection) {
+      sendToParent({ type: "selection:clear" });
+      return;
+    }
+
+    sendToParent({
+      type,
+      text: selection.text,
+      anchor: selection.anchor,
+      pixelY: selection.pixelY,
+      rect: serializeViewportRect(selection.rect),
+    });
   }
 
   function getAnnotatableOrdinal(element: HTMLImageElement | HTMLCanvasElement): number {
@@ -375,8 +283,6 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
   // Track text selection (desktop)
   document.addEventListener("mouseup", (e) => {
     if (isMobile) return;
-    if (toolbar && toolbar.contains(e.target as Node)) return;
-    if (emojiPicker && emojiPicker.contains(e.target as Node)) return;
 
     setTimeout(() => {
       currentSelection = processSelection();
@@ -388,26 +294,12 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
       }
 
       if (!currentSelection) {
-        if (!emojiPicker) removeToolbar();
         setHoveredAnnotatableElement(null);
         sendToParent({ type: "selection:clear" });
       } else {
-        showToolbar(currentSelection.rect);
-        sendToParent(
-          { type: "selection:made", text: currentSelection.text, anchor: currentSelection.anchor },
-        );
+        emitCurrentSelection("selection:made");
       }
     }, 10);
-  });
-
-  document.addEventListener("mousedown", (e) => {
-    if (
-      toolbar &&
-      !toolbar.contains(e.target as Node) &&
-      (!emojiPicker || !emojiPicker.contains(e.target as Node))
-    ) {
-      removeToolbar();
-    }
   });
 
   document.addEventListener("mousemove", (e) => {
@@ -416,8 +308,6 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
       setHoveredAnnotatableElement(null);
       return;
     }
-    if (toolbar && toolbar.contains(e.target as Node)) return;
-    if (emojiPicker && emojiPicker.contains(e.target as Node)) return;
     setHoveredAnnotatableElement(findAnnotatableElement(e.target));
   });
 
@@ -425,164 +315,9 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
     setHoveredAnnotatableElement(null);
   });
 
-  // Mobile: fixed bottom bar on selection change
-  let mobileBar: HTMLElement | null = null;
-  let mobileBarMode: "actions" | "compose" | "emoji" = "actions";
-
-  function buildMobileBar() {
-    if (mobileBar) mobileBar.remove();
-    const bar = document.createElement("div");
-    bar.className = "mobile-selection-bar";
-    document.body.appendChild(bar);
-    mobileBar = bar;
-    showMobileActions();
-  }
-
-  function showMobileActions() {
-    if (!mobileBar) return;
-    mobileBarMode = "actions";
-    mobileBar.innerHTML = "";
-    mobileBar.style.flexWrap = "";
-
-    const commentBtn = document.createElement("button");
-    commentBtn.className = "toolbar-btn";
-    commentBtn.innerHTML =
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:4px;position:relative;top:0.5px"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>comment';
-    commentBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (currentSelection) showMobileCompose();
-    });
-
-    const divider = document.createElement("div");
-    divider.className = "toolbar-divider";
-
-    const emojiBtn = document.createElement("button");
-    emojiBtn.className = "toolbar-btn";
-    emojiBtn.textContent = "\u{1F525} react";
-    emojiBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (currentSelection) showMobileEmojiRow();
-    });
-
-    mobileBar.appendChild(commentBtn);
-    mobileBar.appendChild(divider);
-    mobileBar.appendChild(emojiBtn);
-  }
-
-  function showMobileCompose() {
-    if (!mobileBar || !currentSelection) return;
-    mobileBarMode = "compose";
-    const savedSelection = currentSelection;
-    mobileBar.innerHTML = "";
-    mobileBar.style.flexWrap = "wrap";
-
-    const compose = document.createElement("div");
-    compose.className = "mobile-compose";
-
-    // Quoted text
-    const quote = document.createElement("div");
-    quote.className = "mobile-compose-quote";
-    const quoteText = savedSelection.text;
-    quote.textContent = quoteText.length > 60 ? quoteText.slice(0, 60) + "..." : quoteText;
-    compose.appendChild(quote);
-
-    // Input row
-    const row = document.createElement("div");
-    row.className = "mobile-compose-row";
-
-    const input = document.createElement("textarea");
-    input.className = "mobile-compose-input";
-    input.placeholder = "add a comment...";
-    input.rows = 1;
-    // Auto-resize
-    input.addEventListener("input", () => {
-      input.style.height = "auto";
-      input.style.height = Math.min(input.scrollHeight, 120) + "px";
-      sendBtn.classList.toggle("active", !!input.value.trim());
-    });
-
-    const sendBtn = document.createElement("button");
-    sendBtn.className = "mobile-compose-send";
-    sendBtn.textContent = "send";
-    sendBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const content = input.value.trim();
-      if (!content) return;
-      sendToParent(
-        {
-          type: "comment:start",
-          text: savedSelection.text,
-          anchor: savedSelection.anchor,
-          pixelY: savedSelection.rect.top + window.scrollY,
-          content,
-        },
-      );
-      window.getSelection()?.removeAllRanges();
-      mobileBar!.classList.remove("visible");
-      currentSelection = null;
-      showMobileActions();
-    });
-
-    row.appendChild(input);
-    row.appendChild(sendBtn);
-    compose.appendChild(row);
-
-    // Cancel
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "mobile-compose-cancel";
-    cancelBtn.textContent = "cancel";
-    cancelBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      showMobileActions();
-    });
-    compose.appendChild(cancelBtn);
-
-    mobileBar.appendChild(compose);
-    requestAnimationFrame(() => input.focus());
-  }
-
-  function showMobileEmojiRow() {
-    if (!mobileBar || !currentSelection) return;
-    mobileBarMode = "emoji";
-    const savedSelection = currentSelection;
-    mobileBar.innerHTML = "";
-    mobileBar.style.flexWrap = "wrap";
-
-    for (const emoji of QUICK_EMOJI) {
-      const btn = document.createElement("button");
-      btn.className = "toolbar-btn";
-      btn.style.fontSize = "22px";
-      btn.style.padding = "8px";
-      btn.textContent = emoji;
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        sendToParent({ type: "reaction:add", emoji, anchor: savedSelection.anchor });
-        window.getSelection()?.removeAllRanges();
-        mobileBar!.classList.remove("visible");
-        currentSelection = null;
-        showMobileActions();
-      });
-      mobileBar.appendChild(btn);
-    }
-
-    const backBtn = document.createElement("button");
-    backBtn.className = "toolbar-btn";
-    backBtn.textContent = "\u{2190}";
-    backBtn.style.marginLeft = "auto";
-    backBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      showMobileActions();
-    });
-    mobileBar.appendChild(backBtn);
-  }
-
   if (isMobile) {
-    buildMobileBar();
-
     let selectionTimer: ReturnType<typeof setTimeout> | null = null;
     document.addEventListener("selectionchange", () => {
-      // Don't dismiss bar while composing
-      if (mobileBarMode === "compose") return;
       if (selectionTimer) clearTimeout(selectionTimer);
       selectionTimer = setTimeout(() => {
         currentSelection = processSelection();
@@ -593,171 +328,36 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
           }
         }
         if (currentSelection) {
-          if (mobileBarMode !== "actions") showMobileActions();
-          mobileBar!.classList.add("visible");
-          sendToParent(
-            { type: "selection:made", text: currentSelection.text, anchor: currentSelection.anchor },
-          );
+          emitCurrentSelection("selection:made");
         } else {
-          mobileBar!.classList.remove("visible");
           sendToParent({ type: "selection:clear" });
         }
       }, 200);
     });
 
     document.addEventListener("click", (event) => {
+      const link = findLinkTarget(event.target);
+      if (link) {
+        event.preventDefault();
+        event.stopPropagation();
+        sendToParent({ type: "document:open-link", href: link.getAttribute("href") || link.href });
+        return;
+      }
+
       const annotatableElement = findAnnotatableElement(event.target);
       if (!annotatableElement) return;
 
       currentSelection = processElementSelection(annotatableElement);
-      if (mobileBarMode !== "actions") showMobileActions();
-      mobileBar!.classList.add("visible");
-      sendToParent(
-        { type: "selection:made", text: currentSelection.text, anchor: currentSelection.anchor },
-      );
+      emitCurrentSelection("selection:made");
     });
-  }
-
-  function showToolbar(rect: DOMRect) {
-    removeToolbar();
-    toolbar = document.createElement("div");
-    toolbar.className = "selection-toolbar";
-
-    const toolbarHeight = 34;
-    const spaceAbove = rect.top;
-    if (spaceAbove >= toolbarHeight + 4) {
-      toolbar.style.top = rect.top + window.scrollY - toolbarHeight + "px";
-      toolbar.dataset.position = "above";
-    } else {
-      toolbar.style.top = rect.bottom + window.scrollY + 4 + "px";
-      toolbar.dataset.position = "below";
-    }
-    toolbar.style.left = rect.left + rect.width / 2 - 60 + "px";
-
-    // Comment button
-    const commentBtn = document.createElement("button");
-    commentBtn.className = "toolbar-btn";
-    commentBtn.innerHTML =
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:4px;position:relative;top:0.5px"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>comment';
-    commentBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (currentSelection) {
-        sendToParent(
-          {
-            type: "comment:start",
-            text: currentSelection.text,
-            anchor: currentSelection.anchor,
-            pixelY: currentSelection.rect.top + window.scrollY,
-          },
-        );
-        removeToolbar();
-        window.getSelection()?.removeAllRanges();
-      }
+  } else {
+    document.addEventListener("click", (event) => {
+      const link = findLinkTarget(event.target);
+      if (!link) return;
+      event.preventDefault();
+      event.stopPropagation();
+      sendToParent({ type: "document:open-link", href: link.getAttribute("href") || link.href });
     });
-
-    // Divider
-    const divider = document.createElement("div");
-    divider.className = "toolbar-divider";
-
-    // Emoji button
-    const emojiBtn = document.createElement("button");
-    emojiBtn.className = "toolbar-btn";
-    emojiBtn.innerHTML = "\u{1F525} react";
-    emojiBtn.addEventListener("mousedown", (e) => {
-      // Prevent default to stop the browser from collapsing the text selection
-      e.preventDefault();
-      e.stopPropagation();
-    });
-    emojiBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (emojiPicker) {
-        removeEmojiPicker();
-      } else {
-        showEmojiPicker(rect);
-      }
-    });
-
-    toolbar.appendChild(commentBtn);
-    toolbar.appendChild(divider);
-    toolbar.appendChild(emojiBtn);
-    document.body.appendChild(toolbar);
-  }
-
-  function removeToolbar() {
-    removeEmojiPicker();
-    if (toolbar) {
-      toolbar.remove();
-      toolbar = null;
-    }
-  }
-
-  function showEmojiPicker(selectionRect: DOMRect) {
-    removeEmojiPicker();
-    emojiPicker = document.createElement("div");
-    emojiPicker.className = "emoji-picker";
-
-    const pickerHeight = 52; // row height + padding
-    const toolbarHeight = 34;
-    const isToolbarAbove = toolbar?.dataset.position !== "below";
-
-    if (isToolbarAbove) {
-      const spaceAbove = selectionRect.top;
-      if (spaceAbove >= toolbarHeight + pickerHeight + 8) {
-        // Emoji picker above toolbar
-        emojiPicker.style.top =
-          selectionRect.top + window.scrollY - toolbarHeight - pickerHeight - 4 + "px";
-      } else {
-        // Not enough room — put below selection
-        emojiPicker.style.top = selectionRect.bottom + window.scrollY + 4 + "px";
-      }
-    } else {
-      // Toolbar is below selection, put picker below toolbar
-      emojiPicker.style.top = selectionRect.bottom + window.scrollY + toolbarHeight + 8 + "px";
-    }
-    emojiPicker.style.left = selectionRect.left + selectionRect.width / 2 - 80 + "px";
-
-    // Quick-pick row
-    const row = document.createElement("div");
-    row.className = "emoji-row";
-    for (const emoji of QUICK_EMOJI) {
-      const btn = document.createElement("button");
-      btn.className = "emoji-btn";
-      btn.textContent = emoji;
-      btn.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-      });
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        submitReaction(emoji);
-      });
-      row.appendChild(btn);
-    }
-    emojiPicker.appendChild(row);
-
-    document.body.appendChild(emojiPicker);
-  }
-
-  function removeEmojiPicker() {
-    if (emojiPicker) {
-      emojiPicker.remove();
-      emojiPicker = null;
-    }
-  }
-
-  function submitReaction(emoji: string) {
-    if (currentSelection) {
-      sendToParent(
-        {
-          type: "reaction:add",
-          emoji,
-          text: currentSelection.text,
-          anchor: currentSelection.anchor,
-        },
-      );
-      removeToolbar();
-      window.getSelection()?.removeAllRanges();
-    }
   }
 
   function reportHighlightPositions() {
@@ -877,6 +477,9 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
       scrollTop: window.scrollY,
       scrollHeight: document.documentElement.scrollHeight,
     });
+    if (currentSelection) {
+      emitCurrentSelection("selection:geometry");
+    }
   }, { passive: true });
 
   // Receive messages from parent
@@ -928,6 +531,14 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
           scrollTop: window.scrollY,
           scrollHeight: document.documentElement.scrollHeight,
         });
+        break;
+      case "selection:request":
+        emitCurrentSelection("selection:geometry");
+        break;
+      case "selection:clear-request":
+        window.getSelection()?.removeAllRanges();
+        currentSelection = null;
+        sendToParent({ type: "selection:clear" });
         break;
     }
   });
@@ -1146,11 +757,13 @@ import type { Anchor, ElementSelector, Selector } from "@sharehtml/shared";
 
   function collectDocumentTextIndex() {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let node: Text | null;
     let text = "";
     const nodes: { node: Text; start: number; end: number }[] = [];
 
-    while ((node = walker.nextNode() as Text | null)) {
+    while (true) {
+      const nextNode = walker.nextNode();
+      if (!(nextNode instanceof Text)) break;
+      const node = nextNode;
       if (!isCountedTextNode(node)) continue;
       const start = text.length;
       text += node.textContent || "";

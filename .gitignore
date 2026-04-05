@@ -8,3 +8,5 @@ dist/
 
 # Generated test config (created by vitest.config.ts from wrangler.jsonc)
 apps/worker/tests/wrangler.jsonc
+apps/worker/test-results/
+apps/worker/playwright-report/

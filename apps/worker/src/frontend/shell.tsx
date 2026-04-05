@@ -13,6 +13,7 @@ interface ShellParams {
   shareMode: ShareMode;
   canManageSharing: boolean;
   assets: AssetUrls;
+  viewerCapabilityToken: string;
 }
 
 function getShareDescription(authMode: AuthMode, shareMode: ShareMode): string {
@@ -30,7 +31,17 @@ function getShareDescription(authMode: AuthMode, shareMode: ShareMode): string {
 }
 
 export function ShellView(
-  { docId, title, ownerEmail, email, authMode, shareMode, canManageSharing, assets }: ShellParams,
+  {
+    docId,
+    title,
+    ownerEmail,
+    email,
+    authMode,
+    shareMode,
+    canManageSharing,
+    assets,
+    viewerCapabilityToken,
+  }: ShellParams,
 ) {
   const jsx = (
     <html lang="en">
@@ -82,8 +93,7 @@ export function ShellView(
           <div class="iframe-container">
             <iframe
               id="doc-iframe"
-              src={`/d/${docId}/content`}
-              sandbox="allow-scripts allow-popups"
+              sandbox="allow-scripts"
               allow="fullscreen"
               allowFullScreen
             ></iframe>
@@ -164,7 +174,16 @@ export function ShellView(
 
         <script>
           {raw(
-            `window.__COMMENT_CONFIG__ = ${safeJsonForScript({ docId, email, authMode, shareMode, canManageSharing })}`,
+            `window.__COMMENT_CONFIG__ = ${safeJsonForScript({
+              docId,
+              email,
+              authMode,
+              shareMode,
+              canManageSharing,
+              contentPath: `/d/${docId}/content`,
+              collabJsPath: assets.collabJs,
+              viewerCapabilityToken,
+            })}`,
           )}
         </script>
         <script type="module" src={assets.shellClientJs}></script>

@@ -2,8 +2,13 @@ import { Hono } from "hono";
 import { shareModeFromInt, type AppBindings, type DocumentRow } from "../types.js";
 import { ShellView } from "../frontend/shell.js";
 import { getAssetUrls } from "../utils/assets.js";
+import { createCapabilityToken } from "../utils/capability.js";
+import { createAttachmentHeaders } from "../utils/download.js";
+import { requireViewerBrowserCapability } from "../utils/request-security.js";
 import { getRegistry } from "../utils/registry.js";
 import { getRenderedObject } from "../utils/document-storage.js";
+
+const CAPABILITY_TTL_SECONDS = 600;
 
 const viewer = new Hono<AppBindings>();
 
@@ -41,6 +46,12 @@ viewer.get("/d/:id", async (c) => {
   const { doc, registry } = result;
 
   const assets = await getAssetUrls(c.env.ASSETS);
+  const viewerCapabilityToken = await createCapabilityToken(c.env, {
+    scope: "viewer",
+    email,
+    documentId: id,
+    ttlSeconds: CAPABILITY_TTL_SECONDS,
+  });
 
   // Record view (don't block response, but ensure it completes)
   c.executionCtx.waitUntil(registry.recordView(email, id).catch(() => {}));
@@ -55,11 +66,33 @@ viewer.get("/d/:id", async (c) => {
       shareMode: shareModeFromInt(doc.is_shared),
       canManageSharing: c.env.AUTH_MODE === "access" && doc.owner_email === email,
       assets,
+      viewerCapabilityToken,
     }),
   );
 });
 
-// Raw HTML content (served in iframe)
+// Refresh a viewer capability token. The shell calls this before the current
+// token expires so long-lived sessions keep working.
+viewer.post("/d/:id/capability", async (c) => {
+  const id = c.req.param("id");
+  const { email } = c.get("authUser");
+
+  const result = await loadDocWithAccessCheck(c.env, id, email);
+  if (!result) return c.text("Not found", 404);
+
+  const protectedResponse = await requireViewerBrowserCapability(c, id);
+  if (protectedResponse) return protectedResponse;
+
+  const token = await createCapabilityToken(c.env, {
+    scope: "viewer",
+    email,
+    documentId: id,
+    ttlSeconds: CAPABILITY_TTL_SECONDS,
+  });
+  return c.json({ token });
+});
+
+// Rendered document bytes. The shell fetches this and assigns iframe.srcdoc.
 viewer.get("/d/:id/content", async (c) => {
   const id = c.req.param("id");
   const { email } = c.get("authUser");
@@ -67,6 +100,8 @@ viewer.get("/d/:id/content", async (c) => {
   const result = await loadDocWithAccessCheck(c.env, id, email);
   if (!result) return c.text("Not found", 404);
   const { doc } = result;
+  const protectedResponse = await requireViewerBrowserCapability(c, id, { responseType: "text" });
+  if (protectedResponse) return protectedResponse;
 
   const obj = await getRenderedObject(c.env.DOCUMENTS_BUCKET, id, doc);
 
@@ -74,32 +109,12 @@ viewer.get("/d/:id/content", async (c) => {
     return c.text("Content not found", 404);
   }
 
-  let html = await obj.text();
+  const renderedFilename = doc.rendered_filename || doc.filename;
 
-  // Inject <base target="_blank"> so links open in new tabs instead of navigating the iframe
-  const baseTag = `<base target="_blank">`;
-  if (html.includes("<head>")) {
-    html = html.replace("<head>", `<head>${baseTag}`);
-  } else if (html.includes("<html")) {
-    html = html.replace(/<html[^>]*>/, `$&${baseTag}`);
-  } else {
-    html = baseTag + html;
-  }
-
-  // Inject collaboration script before </body>
-  const assets = await getAssetUrls(c.env.ASSETS);
-  const script = `<script src="${assets.collabJs}"></script>`;
-  if (html.includes("</body>")) {
-    html = html.replace("</body>", `${script}</body>`);
-  } else {
-    html += script;
-  }
-
-  return new Response(html, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "sandbox allow-scripts allow-popups",
-    },
+  return new Response(obj.body, {
+    headers: createAttachmentHeaders(renderedFilename, {
+      "X-ShareHTML-Download-Content-Type": "text/html; charset=utf-8",
+    }),
   });
 });
 
@@ -110,6 +125,12 @@ viewer.get("/d/:id/ws", async (c) => {
 
   const result = await loadDocWithAccessCheck(c.env, id, email);
   if (!result) return c.text("Not found", 404);
+  const protectedResponse = await requireViewerBrowserCapability(c, id, {
+    requireOrigin: true,
+    responseType: "text",
+    allowQueryCapability: true,
+  });
+  if (protectedResponse) return protectedResponse;
 
   const headers = new Headers(c.req.raw.headers);
   headers.set("X-Verified-Email", email);

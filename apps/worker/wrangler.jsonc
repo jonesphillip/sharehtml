@@ -67,6 +67,9 @@
         "ACCESS_AUD": "",
         "ACCESS_TEAM": "",
       },
+      "secrets": {
+        "required": ["VIEWER_CAPABILITY_SECRET"],
+      },
       "assets": {
         "not_found_handling": "none",
         "binding": "ASSETS",

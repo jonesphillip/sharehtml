@@ -1,4 +1,5 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { resolve } from "node:path";
@@ -108,14 +109,14 @@ function spinner(message: string, gap = false): { stop: (final?: string) => void
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let i = 0;
   const prefix = gap ? "\n" : "";
-  process.stdout.write(`${prefix}  ${dim(frames[i++ % frames.length])} ${message}`);
+  process.stdout.write(`${prefix}\r\x1b[K  ${dim(frames[i++ % frames.length])} ${message}`);
   const id = setInterval(() => {
-    process.stdout.write(`\r  ${dim(frames[i++ % frames.length])} ${message}`);
+    process.stdout.write(`\r\x1b[K  ${dim(frames[i++ % frames.length])} ${message}`);
   }, 80);
   return {
     stop(final?: string) {
       clearInterval(id);
-      process.stdout.write(`\r  ${final ?? message}${" ".repeat(20)}\n`);
+      process.stdout.write(`\r\x1b[K  ${final ?? message}\n`);
     },
   };
 }
@@ -255,6 +256,121 @@ function writeWranglerProductionVars(path: string, vars: Record<string, string>)
 
   content = content.replace(match[0], match[1] + varsBlock + match[3]);
   writeFileSync(path, content, "utf-8");
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function extractLeadingJsonValue(value: string): string | null {
+  const trimmed = value.trimStart();
+  const firstChar = trimmed[0];
+  if (firstChar !== "[" && firstChar !== "{") {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const char = trimmed[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "[" || char === "{") {
+      depth++;
+      continue;
+    }
+
+    if (char === "]" || char === "}") {
+      depth--;
+      if (depth === 0) {
+        return trimmed.slice(0, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseSecretList(output: string): string[] {
+  const jsonText = extractLeadingJsonValue(stripAnsi(output));
+  if (!jsonText) {
+    throw new Error("unexpected secret list response");
+  }
+
+  const parsed: unknown = JSON.parse(jsonText);
+  if (!Array.isArray(parsed)) {
+    throw new Error("unexpected secret list response");
+  }
+
+  const secrets: string[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) continue;
+    if (!("name" in entry) || typeof entry.name !== "string") continue;
+    secrets.push(entry.name);
+  }
+  return secrets;
+}
+
+function shouldTreatSecretListFailureAsMissingWorker(message: string): boolean {
+  return message.includes("script not found") ||
+    message.includes("workers.api.error.script_not_found") ||
+    message.includes("There doesn't seem to be a Worker");
+}
+
+async function hasProductionSecret(name: string): Promise<boolean> {
+  try {
+    const output = await run("npx", [
+      "wrangler",
+      "secret",
+      "list",
+      "--env",
+      "production",
+      "--format",
+      "json",
+    ]);
+    return parseSecretList(output).includes(name);
+  } catch (error: any) {
+    const message = formatCommandError(error);
+    if (shouldTreatSecretListFailureAsMissingWorker(message)) {
+      return false;
+    }
+    throw new Error(message);
+  }
+}
+
+async function ensureProductionSecret(name: string): Promise<"created" | "existing"> {
+  if (await hasProductionSecret(name)) {
+    return "existing";
+  }
+
+  const value = randomBytes(32).toString("hex");
+  await run(
+    "npx",
+    ["wrangler", "secret", "put", name, "--env", "production"],
+    { input: `${value}\n` },
+  );
+  return "created";
 }
 
 type SelectOption = { label: string; value: string; selected: boolean };
@@ -876,11 +992,26 @@ async function main() {
     fail(`Failed to update wrangler.jsonc: ${e.message}`);
   }
 
+  if (useAccess) {
+    s = spinner("Ensuring production browser capability secret...", true);
+    try {
+      const status = await ensureProductionSecret("VIEWER_CAPABILITY_SECRET");
+      s.stop(
+        status === "created"
+          ? "Browser capability secret created"
+          : "Browser capability secret already configured",
+      );
+    } catch (e: any) {
+      s.stop();
+      fail(`Failed to configure VIEWER_CAPABILITY_SECRET: ${formatCommandError(e)}`);
+    }
+  }
+
   s = spinner("Deploying worker (production)...", true);
   let workerUrl: string;
   try {
     await run("npx", ["vite", "build"], { env: { CLOUDFLARE_ENV: "production" } });
-    const output = await run("npx", ["wrangler", "deploy"], { input: "y\n" });
+    const output = await run("npx", ["wrangler", "deploy", "--env", "production"], { input: "y\n" });
     const urlMatch = output.match(/https:\/\/[\w.-]+\.workers\.dev/);
     if (!urlMatch) {
       throw new Error("Could not parse worker URL from deploy output.");

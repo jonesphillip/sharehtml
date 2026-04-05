@@ -10,6 +10,8 @@ import {
   getSourceDocumentKey,
   getSourceObject,
 } from "../utils/document-storage.js";
+import { createAttachmentHeaders } from "../utils/download.js";
+import { requireHomeBrowserCapability, requireViewerBrowserCapability } from "../utils/request-security.js";
 
 const api = new Hono<AppBindings>();
 
@@ -40,10 +42,6 @@ function getDocumentTitle(filename: string, title: string | null, sourceKind?: S
   }
 
   return filename.replace(/\.(html?)$/i, "");
-}
-
-function sanitizeDownloadFilename(filename: string): string {
-  return filename.replace(/["\\]/g, "_");
 }
 
 function getSourceMimeType(kind: SourceKind): string {
@@ -121,6 +119,9 @@ async function restoreDocumentSnapshot(
 }
 
 api.post("/documents", async (c) => {
+  const protectedResponse = await requireHomeBrowserCapability(c);
+  if (protectedResponse) return protectedResponse;
+
   const ownerEmail = c.get("authUser").email;
   const formData = await c.req.formData();
   const rawFile = formData.get("file");
@@ -184,6 +185,9 @@ api.post("/documents", async (c) => {
 });
 
 api.get("/documents/by-filename", async (c) => {
+  const protectedResponse = await requireHomeBrowserCapability(c, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
+
   const filename = c.req.query("filename");
   if (!filename) {
     return c.json({ error: "filename required" }, 400);
@@ -205,6 +209,9 @@ api.get("/documents/by-filename", async (c) => {
 
 // Recently viewed documents (scoped to authenticated user)
 api.get("/documents/recent", async (c) => {
+  const protectedResponse = await requireHomeBrowserCapability(c, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
+
   const email = c.get("authUser").email;
   const registry = getRegistry(c.env);
   const documents = await registry.getRecentViews(email);
@@ -213,6 +220,9 @@ api.get("/documents/recent", async (c) => {
 
 // List documents (scoped to authenticated user)
 api.get("/documents", async (c) => {
+  const protectedResponse = await requireHomeBrowserCapability(c, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
+
   const owner = c.get("authUser").email;
   const registry = getRegistry(c.env);
   const query = (c.req.query("q") || "").trim();
@@ -240,6 +250,8 @@ api.get("/documents", async (c) => {
 
 api.get("/documents/:id/raw", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
   if (!doc || doc.owner_email !== c.get("authUser").email) {
@@ -261,15 +273,16 @@ api.get("/documents/:id/raw", async (c) => {
     : "text/html; charset=utf-8";
 
   return new Response(object.body, {
-    headers: {
-      "Content-Type": contentType,
-      "Content-Disposition": `attachment; filename="${sanitizeDownloadFilename(downloadFilename)}"`,
-    },
+    headers: createAttachmentHeaders(downloadFilename, {
+      "X-ShareHTML-Download-Content-Type": contentType,
+    }),
   });
 });
 
 api.get("/documents/:id/source", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
   if (!doc || doc.owner_email !== c.get("authUser").email) {
@@ -282,17 +295,18 @@ api.get("/documents/:id/source", async (c) => {
   }
 
   return new Response(object.body, {
-    headers: {
-      "Content-Type": getSourceMimeType(narrowSourceKind(doc.source_kind)),
-      "Content-Disposition": `attachment; filename="${sanitizeDownloadFilename(doc.source_filename)}"`,
+    headers: createAttachmentHeaders(doc.source_filename, {
+      "X-ShareHTML-Download-Content-Type": getSourceMimeType(narrowSourceKind(doc.source_kind)),
       "X-ShareHTML-Source-Kind": doc.source_kind || "html",
       "X-ShareHTML-Source-Language": doc.source_language || "",
-    },
+    }),
   });
 });
 
 api.get("/documents/:id/rendered", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
   if (!doc || doc.owner_email !== c.get("authUser").email) {
@@ -306,16 +320,17 @@ api.get("/documents/:id/rendered", async (c) => {
 
   const renderedFilename = doc.rendered_filename || doc.filename;
   return new Response(object.body, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Content-Disposition": `attachment; filename="${sanitizeDownloadFilename(renderedFilename)}"`,
-    },
+    headers: createAttachmentHeaders(renderedFilename, {
+      "X-ShareHTML-Download-Content-Type": "text/html; charset=utf-8",
+    }),
   });
 });
 
 // Get document metadata (ownership check)
 api.get("/documents/:id", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
   if (!doc || doc.owner_email !== c.get("authUser").email) {
@@ -326,6 +341,8 @@ api.get("/documents/:id", async (c) => {
 
 api.put("/documents/:id", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id);
+  if (protectedResponse) return protectedResponse;
   const formData = await c.req.formData();
   const rawFile = formData.get("file");
   const file = rawFile instanceof File ? rawFile : null;
@@ -464,6 +481,8 @@ api.put("/documents/:id", async (c) => {
 
 api.get("/documents/:id/share", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
   if (!doc || doc.owner_email !== c.get("authUser").email) {
@@ -476,6 +495,8 @@ api.get("/documents/:id/share", async (c) => {
 
 api.put("/documents/:id/share", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id);
+  if (protectedResponse) return protectedResponse;
 
   if (c.env.AUTH_MODE !== "access") {
     return c.json({ error: "Cloudflare Access is required for document sharing controls" }, 400);
@@ -534,6 +555,8 @@ api.put("/documents/:id/share", async (c) => {
 // Delete document
 api.delete("/documents/:id", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id);
+  if (protectedResponse) return protectedResponse;
 
   const registry = getRegistry(c.env);
   const meta = await registry.getDocument(id);
@@ -568,6 +591,8 @@ api.delete("/documents/:id", async (c) => {
 
 api.get("/documents/:id/comments", async (c) => {
   const id = c.req.param("id");
+  const protectedResponse = await requireViewerBrowserCapability(c, id, { requireOrigin: false });
+  if (protectedResponse) return protectedResponse;
   const email = c.get("authUser").email;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);

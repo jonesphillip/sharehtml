@@ -31,6 +31,7 @@ pnpm run setup
 ```
 
 The interactive setup script walks you through everything: deploying the worker, installing the CLI, and configuring authentication. Cloudflare Access is optional — the setup script asks if you want authentication. Without it, anyone with a link can view and comment.
+If you enable Cloudflare Access, setup also provisions the production `VIEWER_CAPABILITY_SECRET` used to sign browser capability tokens for the trusted viewer shell.
 
 To install the CLI directly:
 
@@ -71,6 +72,15 @@ If you've already run setup and just need to redeploy:
 pnpm run deploy
 ```
 
+If `AUTH_MODE=access`, make sure the production worker already has `VIEWER_CAPABILITY_SECRET` configured. `pnpm run setup` handles that automatically.
+
+To create it manually:
+
+```bash
+openssl rand -hex 32
+npx wrangler secret put VIEWER_CAPABILITY_SECRET --env production
+```
+
 ### Local development
 
 ```bash
@@ -78,6 +88,7 @@ pnpm dev
 ```
 
 Starts the Vite dev server with Wrangler at http://localhost:5173. Local dev uses the default environment — `AUTH_MODE` is `"none"`, no login required.
+Local development does not require `VIEWER_CAPABILITY_SECRET`.
 
 To use the CLI locally:
 
@@ -128,13 +139,19 @@ Install the sharehtml skill to let coding agents deploy documents, compare chang
 
 ## Configuration
 
-Auth config lives in `wrangler.jsonc` under `env.production.vars`, set by `pnpm run setup`:
+Production auth vars live in `wrangler.jsonc` under `env.production.vars`, set by `pnpm run setup`:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `AUTH_MODE` | Yes | `"none"` disables auth, `"access"` enables Cloudflare Access JWT verification |
 | `ACCESS_AUD` | When `AUTH_MODE=access` | Cloudflare Access Application Audience tag |
 | `ACCESS_TEAM` | When `AUTH_MODE=access` | Cloudflare Access team name |
+
+Production secrets:
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `VIEWER_CAPABILITY_SECRET` | When `AUTH_MODE=access` | Wrangler secret used to sign short-lived browser capability tokens. These tokens let the trusted parent viewer shell call privileged browser endpoints without giving the same authority to untrusted uploaded JS running inside the sandboxed iframe. |
 
 ## Project Structure
 

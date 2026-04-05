@@ -36,5 +36,6 @@ export default defineConfig({
   ],
   test: {
     globals: true,
+    exclude: ["e2e/**"],
   },
 });
