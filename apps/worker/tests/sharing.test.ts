@@ -86,6 +86,8 @@ describe("Access control honors share modes", () => {
 
     const contentRes = await exports.default.fetch("https://example.com/d/email-content/content");
     expect(contentRes.status).toBe(200);
+    expect(contentRes.headers.get("Content-Type")).toBe("application/octet-stream");
+    expect(contentRes.headers.get("X-Content-Type-Options")).toBe("nosniff");
 
     // Denied user
     const reg2 = await createDoc("email-content-denied", "other@example.com", 2);
@@ -93,5 +95,25 @@ describe("Access control honors share modes", () => {
 
     const deniedContent = await exports.default.fetch("https://example.com/d/email-content-denied/content");
     expect(deniedContent.status).toBe(404);
+  });
+
+  it("rejects websocket upgrades from untrusted origins", async () => {
+    await createDoc("ws-origin-check", "dev@localhost", 0);
+
+    const deniedRes = await exports.default.fetch("https://example.com/d/ws-origin-check/ws", {
+      headers: {
+        Upgrade: "websocket",
+        Origin: "null",
+      },
+    });
+    expect(deniedRes.status).toBe(403);
+
+    const allowedRes = await exports.default.fetch("https://example.com/d/ws-origin-check/ws", {
+      headers: {
+        Upgrade: "websocket",
+        Origin: "https://example.com",
+      },
+    });
+    expect(allowedRes.status).toBe(101);
   });
 });

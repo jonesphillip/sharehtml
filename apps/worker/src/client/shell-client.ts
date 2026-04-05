@@ -1,24 +1,96 @@
 import "./styles.css";
 
-import type { Anchor, Comment, Reaction, UserPresence } from "@sharehtml/shared";
+import type { Anchor, Comment, Reaction, Selector, ServerMessage, UserPresence } from "@sharehtml/shared";
+import { isRecord } from "../types.js";
+import { BROWSER_CAPABILITY_HEADER, WEBSOCKET_CAPABILITY_QUERY_PARAM } from "../utils/security-constants.js";
 
 type AuthMode = "access" | "none";
 type ShareMode = "private" | "link" | "emails";
+type ShareResponse = { mode: ShareMode; emails: string[] };
 
-const config = (window as unknown as {
-  __COMMENT_CONFIG__: {
-    docId: string;
-    email: string;
-    authMode: AuthMode;
-    shareMode: ShareMode;
-    canManageSharing: boolean;
+interface SelectionViewportRect {
+  top: number;
+  left: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+interface CommentConfig {
+  docId: string;
+  email: string;
+  authMode: AuthMode;
+  shareMode: ShareMode;
+  canManageSharing: boolean;
+  contentPath: string;
+  collabJsPath: string;
+  viewerCapabilityToken: string;
+}
+
+interface ElementConstructor<T extends Element> {
+  new(): T;
+}
+
+interface SelectionPayload {
+  text: string;
+  anchor: Anchor;
+  pixelY: number;
+  rect: SelectionViewportRect;
+}
+
+interface AnnotationHighlightItem {
+  id: string;
+  anchor: Anchor;
+  resolved: boolean;
+}
+
+function parseCommentConfig(value: unknown): CommentConfig | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.docId !== "string") return null;
+  if (typeof value.email !== "string") return null;
+  if (value.authMode !== "access" && value.authMode !== "none") return null;
+  if (value.shareMode !== "private" && value.shareMode !== "link" && value.shareMode !== "emails") return null;
+  if (typeof value.canManageSharing !== "boolean") return null;
+  if (typeof value.contentPath !== "string") return null;
+  if (typeof value.collabJsPath !== "string") return null;
+  if (typeof value.viewerCapabilityToken !== "string") return null;
+
+  return {
+    docId: value.docId,
+    email: value.email,
+    authMode: value.authMode,
+    shareMode: value.shareMode,
+    canManageSharing: value.canManageSharing,
+    contentPath: value.contentPath,
+    collabJsPath: value.collabJsPath,
+    viewerCapabilityToken: value.viewerCapabilityToken,
   };
-})
-  .__COMMENT_CONFIG__;
+}
+
+function getCommentConfig(): CommentConfig {
+  const config = parseCommentConfig(Reflect.get(window, "__COMMENT_CONFIG__"));
+  if (!config) {
+    throw new Error("missing viewer config");
+  }
+  return config;
+}
+
+function getRequiredElementById<T extends Element>(id: string, ctor: ElementConstructor<T>): T {
+  const element = document.getElementById(id);
+  if (!(element instanceof ctor)) {
+    throw new Error(`missing required element: ${id}`);
+  }
+  return element;
+}
+
+const config = getCommentConfig();
 const DOC_ID = config.docId;
 const USER_EMAIL = config.email;
 const AUTH_MODE = config.authMode;
 const CAN_MANAGE_SHARING = config.canManageSharing;
+const CONTENT_PATH = config.contentPath;
+const COLLAB_JS_PATH = config.collabJsPath;
+let VIEWER_CAPABILITY_TOKEN = config.viewerCapabilityToken;
 
 // State
 let ws: WebSocket | null = null;
@@ -34,6 +106,12 @@ const hiddenSectionKey = "comment_hidden_section_" + DOC_ID;
 let showHiddenSection = localStorage.getItem(hiddenSectionKey) === "expanded";
 const sidebarKey = "comment_sidebar_" + DOC_ID;
 let reactions: Reaction[] = [];
+let pendingSelection: {
+  text: string;
+  anchor: Anchor;
+  pixelY: number;
+  rect: SelectionViewportRect;
+} | null = null;
 let composeAnchor: Anchor | null = null;
 let composeText = "";
 let composePixelY = 0;
@@ -50,32 +128,46 @@ let emailsLoaded = false;
 let shareMessageOverride: string | null = null;
 let isSavingShareState = false;
 const ANNOTATION_ALIGNMENT_BIAS_PX = 24;
+const SELECTION_TOOLBAR_EMOJIS = [
+  "\u{1F44D}",
+  "\u{2764}\u{FE0F}",
+  "\u{1F602}",
+  "\u{1F389}",
+  "\u{1F440}",
+  "\u{1F525}",
+  "\u{1F64F}",
+  "\u{1F680}",
+];
+const SELECTION_TOOLBAR_GAP_PX = 8;
+let selectionToolbar: HTMLElement | null = null;
+let selectionEmojiPicker: HTMLElement | null = null;
 
 // Elements
-const iframe = document.getElementById("doc-iframe") as HTMLIFrameElement;
-const sidebar = document.getElementById("sidebar")!;
-const sidebarContent = document.getElementById("sidebar-content")!;
+const iframe = getRequiredElementById("doc-iframe", HTMLIFrameElement);
+const sidebar = getRequiredElementById("sidebar", HTMLDivElement);
+const sidebarContent = getRequiredElementById("sidebar-content", HTMLDivElement);
 const hiddenSectionHost = document.createElement("div");
-const sidebarToggle = document.getElementById("sidebar-toggle")!;
-const presenceDots = document.getElementById("presence-dots")!;
-const commentCount = document.getElementById("comment-count")!;
-const filterResolved = document.getElementById("filter-resolved")!;
-const nameModal = document.getElementById("name-modal")!;
-const modalEmail = document.getElementById("modal-email")!;
-const nameInput = document.getElementById("name-input") as HTMLInputElement;
-const nameSubmit = document.getElementById("name-submit") as HTMLButtonElement;
-const shareBtn = document.getElementById("share-btn")!;
-const shareModal = document.getElementById("share-modal")!;
-const shareLinkInput = document.getElementById("share-link-input") as HTMLInputElement;
-const shareCopyBtn = document.getElementById("share-copy-btn")!;
-const shareModeSelect = document.getElementById("share-mode-select") as HTMLSelectElement;
-const shareModeDescription = document.getElementById("share-mode-description")!;
-const shareEmailsSection = document.getElementById("share-emails-section")!;
-const shareEmailInput = document.getElementById("share-email-input") as HTMLInputElement;
-const shareEmailAdd = document.getElementById("share-email-add")!;
-const shareEmailList = document.getElementById("share-email-list")!;
-const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
+const sidebarToggle = getRequiredElementById("sidebar-toggle", HTMLButtonElement);
+const presenceDots = getRequiredElementById("presence-dots", HTMLDivElement);
+const commentCount = getRequiredElementById("comment-count", HTMLSpanElement);
+const filterResolved = getRequiredElementById("filter-resolved", HTMLButtonElement);
+const nameModal = getRequiredElementById("name-modal", HTMLDivElement);
+const modalEmail = getRequiredElementById("modal-email", HTMLDivElement);
+const nameInput = getRequiredElementById("name-input", HTMLInputElement);
+const nameSubmit = getRequiredElementById("name-submit", HTMLButtonElement);
+const shareBtn = getRequiredElementById("share-btn", HTMLButtonElement);
+const shareModal = getRequiredElementById("share-modal", HTMLDivElement);
+const shareLinkInput = getRequiredElementById("share-link-input", HTMLInputElement);
+const shareCopyBtn = getRequiredElementById("share-copy-btn", HTMLButtonElement);
+const shareModeSelect = getRequiredElementById("share-mode-select", HTMLSelectElement);
+const shareModeDescription = getRequiredElementById("share-mode-description", HTMLDivElement);
+const shareEmailsSection = getRequiredElementById("share-emails-section", HTMLDivElement);
+const shareEmailInput = getRequiredElementById("share-email-input", HTMLInputElement);
+const shareEmailAdd = getRequiredElementById("share-email-add", HTMLButtonElement);
+const shareEmailList = getRequiredElementById("share-email-list", HTMLDivElement);
+const sidebarBackdrop = getRequiredElementById("sidebar-backdrop", HTMLDivElement);
 const SANDBOXED_IFRAME_ORIGIN = "null";
+const DOCUMENT_SANDBOX_CSP = "sandbox allow-scripts";
 
 hiddenSectionHost.className = "sidebar-hidden-host";
 sidebar.appendChild(hiddenSectionHost);
@@ -93,6 +185,339 @@ function closeSidebar() {
   localStorage.setItem(sidebarKey, "collapsed");
   sidebarBackdrop.classList.remove("visible");
   sendToIframe({ type: "sidebar:state", open: false });
+  requestSelectionRefresh();
+}
+
+function clearPendingSelection() {
+  pendingSelection = null;
+  removeSelectionEmojiPicker();
+  removeSelectionToolbar();
+}
+
+function setPendingSelection(
+  text: string,
+  anchor: Anchor,
+  pixelY: number,
+  rect: SelectionViewportRect,
+) {
+  pendingSelection = { text, anchor, pixelY, rect };
+}
+
+function requestIframeSelectionClear() {
+  sendToIframe({ type: "selection:clear-request" });
+}
+
+function requestSelectionRefresh() {
+  if (!pendingSelection) return;
+  requestAnimationFrame(() => {
+    sendToIframe({ type: "selection:request" });
+  });
+}
+
+function clearSelectionUi({
+  clearIframe = false,
+  clearPresence = false,
+}: { clearIframe?: boolean; clearPresence?: boolean } = {}) {
+  clearPendingSelection();
+  if (clearIframe) requestIframeSelectionClear();
+  if (clearPresence) {
+    sendMessage({
+      type: "presence:update",
+      selection: undefined,
+    });
+  }
+}
+
+function isSelectionViewportRect(value: unknown): value is SelectionViewportRect {
+  if (!isRecord(value)) return false;
+  const rect = value;
+  return typeof rect.top === "number" && typeof rect.left === "number" &&
+    typeof rect.bottom === "number" && typeof rect.width === "number" &&
+    typeof rect.height === "number";
+}
+
+function parseSelectionPayload(value: unknown): SelectionPayload | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.text !== "string") return null;
+  if (typeof value.pixelY !== "number") return null;
+  if (!isAnchor(value.anchor)) return null;
+  if (!isSelectionViewportRect(value.rect)) return null;
+
+  return {
+    text: value.text,
+    anchor: value.anchor,
+    pixelY: value.pixelY,
+    rect: value.rect,
+  };
+}
+
+function getSelectionAnchorViewportRect() {
+  if (!pendingSelection) return null;
+  const iframeRect = iframe.getBoundingClientRect();
+  return {
+    top: iframeRect.top + pendingSelection.rect.top,
+    bottom: iframeRect.top + pendingSelection.rect.bottom,
+    centerX: iframeRect.left + pendingSelection.rect.left + pendingSelection.rect.width / 2,
+  };
+}
+
+function positionSelectionEmojiPicker() {
+  if (!selectionEmojiPicker) return;
+  const anchor = getSelectionAnchorViewportRect();
+  if (!anchor) return;
+
+  const toolbarRect = selectionToolbar?.getBoundingClientRect();
+  const pickerRect = selectionEmojiPicker.getBoundingClientRect();
+  const baseTop = toolbarRect
+    ? toolbarRect.top - pickerRect.height - 4
+    : anchor.top - pickerRect.height - (34 + SELECTION_TOOLBAR_GAP_PX);
+  const top = baseTop >= 8 ? baseTop : anchor.bottom + 34 + SELECTION_TOOLBAR_GAP_PX;
+  const left = Math.min(
+    Math.max(8, anchor.centerX - pickerRect.width / 2),
+    window.innerWidth - pickerRect.width - 8,
+  );
+  selectionEmojiPicker.style.top = `${top}px`;
+  selectionEmojiPicker.style.left = `${left}px`;
+}
+
+function positionSelectionToolbar() {
+  if (!selectionToolbar) return;
+  const anchor = getSelectionAnchorViewportRect();
+  if (!anchor) return;
+
+  const toolbarRect = selectionToolbar.getBoundingClientRect();
+  const preferredTop = anchor.top >= toolbarRect.height + SELECTION_TOOLBAR_GAP_PX
+    ? anchor.top - toolbarRect.height - SELECTION_TOOLBAR_GAP_PX
+    : anchor.bottom + SELECTION_TOOLBAR_GAP_PX;
+  const top = Math.min(
+    Math.max(8, preferredTop),
+    window.innerHeight - toolbarRect.height - 8,
+  );
+  const left = Math.min(
+    Math.max(8, anchor.centerX - toolbarRect.width / 2),
+    window.innerWidth - toolbarRect.width - 8,
+  );
+
+  selectionToolbar.style.top = `${top}px`;
+  selectionToolbar.style.left = `${left}px`;
+  positionSelectionEmojiPicker();
+}
+
+function removeSelectionEmojiPicker() {
+  if (!selectionEmojiPicker) return;
+  selectionEmojiPicker.remove();
+  selectionEmojiPicker = null;
+}
+
+function removeSelectionToolbar() {
+  if (!selectionToolbar) return;
+  selectionToolbar.remove();
+  selectionToolbar = null;
+}
+
+function handleSelectionOverlayPointerDown(event: MouseEvent): void {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function createSelectionOverlayButton(
+  className: string,
+  content: string,
+  onClick: () => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = className;
+  button.innerHTML = content;
+  button.addEventListener("mousedown", handleSelectionOverlayPointerDown);
+  button.addEventListener("click", function handleSelectionOverlayClick(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
+function openSelectionEmojiPicker() {
+  if (!pendingSelection) return;
+  if (selectionEmojiPicker) {
+    removeSelectionEmojiPicker();
+    return;
+  }
+
+  const picker = document.createElement("div");
+  picker.className = "selection-emoji-picker";
+
+  const row = document.createElement("div");
+  row.className = "selection-emoji-picker-row";
+  for (const emoji of SELECTION_TOOLBAR_EMOJIS) {
+    const button = createSelectionOverlayButton("selection-emoji-picker-btn", emoji, function addReaction() {
+      if (!pendingSelection) return;
+      sendMessage({
+        type: "reaction:add",
+        id: generateId(),
+        emoji,
+        anchor: pendingSelection.anchor,
+      });
+      clearSelectionUi({ clearIframe: true, clearPresence: true });
+    });
+    row.appendChild(button);
+  }
+  picker.appendChild(row);
+
+  document.body.appendChild(picker);
+  selectionEmojiPicker = picker;
+  positionSelectionEmojiPicker();
+}
+
+function renderSelectionToolbar() {
+  if (!pendingSelection) {
+    clearPendingSelection();
+    return;
+  }
+
+  if (!selectionToolbar) {
+    const toolbar = document.createElement("div");
+    toolbar.className = "selection-toolbar-overlay";
+
+    const commentBtn = createSelectionOverlayButton(
+      "selection-toolbar-btn",
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:4px;position:relative;top:0.5px"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>comment',
+      function openSelectionCompose() {
+      if (!pendingSelection) return;
+      const selection = pendingSelection;
+      clearSelectionUi({ clearIframe: true, clearPresence: true });
+      openCompose(selection.text, selection.anchor, selection.pixelY);
+      },
+    );
+
+    const divider = document.createElement("div");
+    divider.className = "selection-toolbar-divider";
+
+    const reactBtn = createSelectionOverlayButton(
+      "selection-toolbar-btn",
+      "\u{1F525} react",
+      function openSelectionReactions() {
+        openSelectionEmojiPicker();
+      },
+    );
+
+    toolbar.appendChild(commentBtn);
+    toolbar.appendChild(divider);
+    toolbar.appendChild(reactBtn);
+    document.body.appendChild(toolbar);
+    selectionToolbar = toolbar;
+  }
+
+  positionSelectionToolbar();
+}
+
+function injectTag(html: string, tag: string, beforeCloseTag: string): string {
+  const lastIndex = html.lastIndexOf(beforeCloseTag);
+  if (lastIndex !== -1) {
+    return html.slice(0, lastIndex) + tag + html.slice(lastIndex);
+  }
+  return html + tag;
+}
+
+function injectIntoDocumentHead(html: string, tag: string): string {
+  if (html.includes("</head>")) {
+    return injectTag(html, tag, "</head>");
+  }
+  if (html.includes("<head>")) {
+    return html.replace("<head>", `<head>${tag}`);
+  }
+  if (html.includes("<html")) {
+    return html.replace(/<html[^>]*>/, `$&<head>${tag}</head>`);
+  }
+  return `<head>${tag}</head>${html}`;
+}
+
+function escapeInlineScript(script: string): string {
+  return script.replace(/<\/script/gi, "<\\/script");
+}
+
+function injectDocumentRuntime(html: string, collabScriptText: string): string {
+  const sandboxMeta =
+    `<meta http-equiv="Content-Security-Policy" content="${DOCUMENT_SANDBOX_CSP}">`;
+  const collabScript = `<script type="module">${escapeInlineScript(collabScriptText)}</script>`;
+  const htmlWithSandbox = injectIntoDocumentHead(html, sandboxMeta);
+  return injectTag(htmlWithSandbox, collabScript, "</body>");
+}
+
+function renderIframeError(message: string) {
+  iframe.srcdoc = `<!doctype html><html lang="en"><body><pre>${escapeHtml(message)}</pre></body></html>`;
+}
+
+async function viewerFetch(input: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set(BROWSER_CAPABILITY_HEADER, VIEWER_CAPABILITY_TOKEN);
+  return fetch(input, { ...init, headers });
+}
+
+// Refresh the capability token before it expires. The server issues tokens
+// with a 10-minute TTL; we refresh every 8 minutes to stay ahead of expiry.
+const CAPABILITY_REFRESH_INTERVAL_MS = 8 * 60 * 1000;
+
+async function refreshCapabilityToken() {
+  try {
+    const response = await viewerFetch(`/d/${DOC_ID}/capability`, { method: "POST" });
+    if (!response.ok) return;
+    const body: unknown = await response.json();
+    if (isRecord(body) && typeof body.token === "string") {
+      VIEWER_CAPABILITY_TOKEN = body.token;
+    }
+  } catch {
+    // Retry on the next interval.
+  }
+}
+
+setInterval(refreshCapabilityToken, CAPABILITY_REFRESH_INTERVAL_MS);
+
+async function loadDocumentIntoIframe() {
+  try {
+    const [contentResponse, collabResponse] = await Promise.all([
+      viewerFetch(CONTENT_PATH),
+      fetch(COLLAB_JS_PATH),
+    ]);
+    if (!contentResponse.ok) {
+      throw new Error(`document fetch failed with status ${contentResponse.status}`);
+    }
+    if (!collabResponse.ok) {
+      throw new Error(`collab fetch failed with status ${collabResponse.status}`);
+    }
+
+    const [html, collabScriptText] = await Promise.all([
+      contentResponse.text(),
+      collabResponse.text(),
+    ]);
+    iframe.srcdoc = injectDocumentRuntime(html, collabScriptText);
+  } catch {
+    renderIframeError("Unable to load document content.");
+  }
+}
+
+function openDocumentLink(rawHref: unknown) {
+  if (typeof rawHref !== "string" || rawHref.trim() === "") return;
+
+  // Fragment-only links (e.g. "#section") have no meaningful target outside
+  // the sandboxed iframe -- skip them to avoid navigating the parent shell.
+  if (rawHref.startsWith("#")) return;
+
+  let url: URL;
+  try {
+    // Try as an absolute URL first. Fall back to treating it as relative,
+    // but note that relative hrefs will resolve against the parent shell's
+    // URL since the iframe's srcdoc has no natural base.
+    url = new URL(rawHref, location.href);
+  } catch {
+    return;
+  }
+
+  if (!["http:", "https:", "mailto:", "tel:"].includes(url.protocol)) {
+    return;
+  }
+
+  window.open(url.toString(), "_blank", "noopener,noreferrer");
 }
 
 function getShareDescription(): string {
@@ -147,18 +572,18 @@ function isShareMode(v: unknown): v is ShareMode {
   return v === "private" || v === "link" || v === "emails";
 }
 
-function parseShareResponse(data: unknown): { mode: ShareMode; emails: string[] } | null {
-  if (typeof data !== "object" || data === null) return null;
-  const obj = data as Record<string, unknown>;
-  if (!isShareMode(obj.mode)) return null;
-  const emails = Array.isArray(obj.emails) ? obj.emails.filter((e): e is string => typeof e === "string") : [];
-  return { mode: obj.mode, emails };
+function parseShareResponse(data: unknown): ShareResponse | null {
+  if (!isRecord(data) || !isShareMode(data.mode)) return null;
+  const emails = Array.isArray(data.emails)
+    ? data.emails.filter((email): email is string => typeof email === "string")
+    : [];
+  return { mode: data.mode, emails };
 }
 
 async function loadShareState() {
   if (emailsLoaded) return;
   try {
-    const response = await fetch(`/api/documents/${DOC_ID}/share`);
+    const response = await viewerFetch(`/api/documents/${DOC_ID}/share`);
     if (!response.ok) throw new Error("fetch failed");
     const data = parseShareResponse(await response.json());
     if (!data) throw new Error("invalid response");
@@ -188,7 +613,7 @@ async function updateShareMode(nextMode: ShareMode, nextEmails?: string[]): Prom
       body.emails = nextEmails ?? sharedEmails;
     }
 
-    const response = await fetch(`/api/documents/${DOC_ID}/share`, {
+    const response = await viewerFetch(`/api/documents/${DOC_ID}/share`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -256,6 +681,8 @@ function init() {
     const isOpen = !sidebar.classList.contains("collapsed") && window.innerWidth > 768;
     sendToIframe({ type: "sidebar:state", open: isOpen });
   });
+
+  void loadDocumentIntoIframe();
 }
 
 function showNameModal() {
@@ -297,6 +724,7 @@ function setupEventListeners() {
     // On mobile, sidebar is overlay — don't hide iframe scrollbar
     const hideScroll = isOpen && window.innerWidth > 768;
     sendToIframe({ type: "sidebar:state", open: hideScroll });
+    requestSelectionRefresh();
   });
 
   sidebarBackdrop.addEventListener("click", closeSidebar);
@@ -379,6 +807,13 @@ function setupEventListeners() {
 
   // Listen for messages from iframe
   window.addEventListener("message", handleIframeMessage);
+  window.addEventListener("resize", positionSelectionToolbar);
+  document.addEventListener("mousedown", (event) => {
+    const target = event.target;
+    if (!(target instanceof Node) || !pendingSelection) return;
+    if (selectionToolbar?.contains(target) || selectionEmojiPicker?.contains(target)) return;
+    clearSelectionUi({ clearIframe: true, clearPresence: true });
+  });
 }
 
 // WebSocket
@@ -388,7 +823,9 @@ let lastPong = 0;
 
 function connectWs() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(protocol + "//" + location.host + "/d/" + DOC_ID + "/ws");
+  const wsUrl = new URL(protocol + "//" + location.host + "/d/" + DOC_ID + "/ws");
+  wsUrl.searchParams.set(WEBSOCKET_CAPABILITY_QUERY_PARAM, VIEWER_CAPABILITY_TOKEN);
+  ws = new WebSocket(wsUrl.toString());
 
   ws.addEventListener("open", () => {
     reconnectAttempts = 0;
@@ -406,7 +843,15 @@ function connectWs() {
   ws.addEventListener("message", (e) => {
     lastPong = Date.now();
     if (e.data === "pong") return;
-    const msg = JSON.parse(e.data as string);
+    if (typeof e.data !== "string") return;
+    let rawMessage: unknown;
+    try {
+      rawMessage = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    const msg = parseServerMessage(rawMessage);
+    if (!msg) return;
     handleServerMessage(msg);
   });
 
@@ -462,11 +907,163 @@ function sendMessage(msg: Record<string, unknown>) {
   }
 }
 
-function handleServerMessage(msg: Record<string, unknown>) {
+function isSelector(value: unknown): value is Selector {
+  if (!isRecord(value) || typeof value.type !== "string") return false;
+
+  switch (value.type) {
+    case "TextQuoteSelector":
+      return typeof value.exact === "string" &&
+        typeof value.prefix === "string" &&
+        typeof value.suffix === "string";
+    case "TextPositionSelector":
+      return typeof value.start === "number" && typeof value.end === "number";
+    case "CssSelector":
+      return typeof value.value === "string";
+    case "RegionSelector":
+      return typeof value.cssSelector === "string" &&
+        typeof value.x === "number" &&
+        typeof value.y === "number" &&
+        typeof value.width === "number" &&
+        typeof value.height === "number";
+    case "ElementSelector":
+      if (typeof value.cssSelector !== "string") return false;
+      if (value.tagName !== "img" && value.tagName !== "canvas") return false;
+      if ("ordinal" in value && value.ordinal !== undefined && typeof value.ordinal !== "number") return false;
+      if ("src" in value && value.src !== undefined && typeof value.src !== "string") return false;
+      if ("alt" in value && value.alt !== undefined && typeof value.alt !== "string") return false;
+      if ("width" in value && value.width !== undefined && typeof value.width !== "number") return false;
+      if ("height" in value && value.height !== undefined && typeof value.height !== "number") return false;
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isAnchor(value: unknown): value is Anchor {
+  return isRecord(value) &&
+    Array.isArray(value.selectors) &&
+    value.selectors.every(isSelector);
+}
+
+function isPresenceSelection(
+  value: unknown,
+): value is NonNullable<UserPresence["selection"]> {
+  return isRecord(value) &&
+    isAnchor(value.anchor) &&
+    typeof value.text === "string";
+}
+
+function isUserPresence(value: unknown): value is UserPresence {
+  return isRecord(value) &&
+    typeof value.email === "string" &&
+    typeof value.name === "string" &&
+    typeof value.color === "string" &&
+    typeof value.last_seen === "number" &&
+    (value.selection === undefined || isPresenceSelection(value.selection));
+}
+
+function isComment(value: unknown): value is Comment {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.document_id === "string" &&
+    typeof value.author_email === "string" &&
+    typeof value.author_name === "string" &&
+    typeof value.author_color === "string" &&
+    typeof value.content === "string" &&
+    (value.anchor === null || isAnchor(value.anchor)) &&
+    (value.parent_id === null || typeof value.parent_id === "string") &&
+    typeof value.resolved === "boolean" &&
+    typeof value.created_at === "string" &&
+    typeof value.updated_at === "string";
+}
+
+function isReaction(value: unknown): value is Reaction {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.document_id === "string" &&
+    typeof value.author_email === "string" &&
+    typeof value.author_name === "string" &&
+    typeof value.emoji === "string" &&
+    isAnchor(value.anchor) &&
+    typeof value.created_at === "string";
+}
+
+const serverMessageTypes = new Set<string>([
+  "users:list",
+  "comments:list",
+  "user:joined",
+  "user:left",
+  "user:name_set",
+  "presence:updated",
+  "comment:created",
+  "comment:updated",
+  "comment:deleted",
+  "comment:resolved",
+  "reactions:list",
+  "reaction:added",
+  "reaction:removed",
+  "error",
+]);
+
+function parseServerMessage(value: unknown): ServerMessage | null {
+  if (!isRecord(value) || typeof value.type !== "string" || !serverMessageTypes.has(value.type)) {
+    return null;
+  }
+
+  switch (value.type) {
+    case "users:list":
+      if (!Array.isArray(value.users) || !value.users.every(isUserPresence)) return null;
+      return { type: "users:list", users: value.users };
+    case "comments:list":
+      if (!Array.isArray(value.comments) || !value.comments.every(isComment)) return null;
+      return { type: "comments:list", comments: value.comments };
+    case "user:joined":
+      if (!isUserPresence(value.user)) return null;
+      return { type: "user:joined", user: value.user };
+    case "user:left":
+      if (typeof value.email !== "string") return null;
+      return { type: "user:left", email: value.email };
+    case "user:name_set":
+      if (typeof value.email !== "string" || typeof value.name !== "string") return null;
+      return { type: "user:name_set", email: value.email, name: value.name };
+    case "presence:updated":
+      if (typeof value.email !== "string") return null;
+      if (value.selection !== undefined && !isPresenceSelection(value.selection)) return null;
+      return { type: "presence:updated", email: value.email, selection: value.selection };
+    case "comment:created":
+      if (!isComment(value.comment)) return null;
+      return { type: "comment:created", comment: value.comment };
+    case "comment:updated":
+      if (!isComment(value.comment)) return null;
+      return { type: "comment:updated", comment: value.comment };
+    case "comment:deleted":
+      if (typeof value.id !== "string") return null;
+      return { type: "comment:deleted", id: value.id };
+    case "comment:resolved":
+      if (typeof value.id !== "string" || typeof value.resolved !== "boolean") return null;
+      return { type: "comment:resolved", id: value.id, resolved: value.resolved };
+    case "reactions:list":
+      if (!Array.isArray(value.reactions) || !value.reactions.every(isReaction)) return null;
+      return { type: "reactions:list", reactions: value.reactions };
+    case "reaction:added":
+      if (!isReaction(value.reaction)) return null;
+      return { type: "reaction:added", reaction: value.reaction };
+    case "reaction:removed":
+      if (typeof value.id !== "string") return null;
+      return { type: "reaction:removed", id: value.id };
+    case "error":
+      if (typeof value.message !== "string") return null;
+      return { type: "error", message: value.message };
+    default:
+      return null;
+  }
+}
+
+function handleServerMessage(msg: ServerMessage) {
   switch (msg.type) {
     case "users:list":
       users.clear();
-      for (const u of msg.users as UserPresence[]) {
+      for (const u of msg.users) {
         users.set(u.email, u);
         if (u.email === USER_EMAIL) userColor = u.color;
       }
@@ -474,21 +1071,21 @@ function handleServerMessage(msg: Record<string, unknown>) {
       break;
 
     case "user:joined":
-      users.set((msg.user as UserPresence).email, msg.user as UserPresence);
+      users.set(msg.user.email, msg.user);
       renderPresence();
       break;
 
     case "user:left":
-      users.delete(msg.email as string);
+      users.delete(msg.email);
       renderPresence();
       sendToIframe({ type: "selection:remote:clear", email: msg.email });
       break;
 
     case "user:name_set": {
-      const u = users.get(msg.email as string);
+      const u = users.get(msg.email);
       if (u) {
-        u.name = msg.name as string;
-        users.set(msg.email as string, u);
+        u.name = msg.name;
+        users.set(msg.email, u);
       }
       renderPresence();
       renderComments();
@@ -497,12 +1094,12 @@ function handleServerMessage(msg: Record<string, unknown>) {
 
     case "presence:updated":
       if (msg.selection) {
-        const u = users.get(msg.email as string);
+        const u = users.get(msg.email);
         sendToIframe({
           type: "selection:remote",
           email: msg.email,
           color: u?.color || "#000",
-          anchor: (msg.selection as { anchor: Anchor }).anchor,
+          anchor: msg.selection.anchor,
         });
       } else {
         sendToIframe({
@@ -513,20 +1110,20 @@ function handleServerMessage(msg: Record<string, unknown>) {
       break;
 
     case "comments:list":
-      comments = msg.comments as Comment[];
+      comments = msg.comments;
       renderComments();
       updateHighlights();
       break;
 
     case "comment:created":
-      comments.push(msg.comment as Comment);
+      comments.push(msg.comment);
       renderComments();
       updateHighlights();
       break;
 
     case "comment:updated": {
-      const idx = comments.findIndex((c) => c.id === (msg.comment as Comment).id);
-      if (idx >= 0) comments[idx] = msg.comment as Comment;
+      const idx = comments.findIndex((c) => c.id === msg.comment.id);
+      if (idx >= 0) comments[idx] = msg.comment;
       renderComments();
       updateHighlights();
       break;
@@ -540,19 +1137,19 @@ function handleServerMessage(msg: Record<string, unknown>) {
 
     case "comment:resolved": {
       const c = comments.find((c) => c.id === msg.id);
-      if (c) c.resolved = msg.resolved as boolean;
+      if (c) c.resolved = msg.resolved;
       renderComments();
       updateHighlights();
       break;
     }
 
     case "reactions:list":
-      reactions = msg.reactions as Reaction[];
+      reactions = msg.reactions;
       updateReactions();
       break;
 
     case "reaction:added":
-      reactions.push(msg.reaction as Reaction);
+      reactions.push(msg.reaction);
       updateReactions();
       break;
 
@@ -567,42 +1164,57 @@ function handleServerMessage(msg: Record<string, unknown>) {
   }
 }
 
+function parsePixelPositions(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {};
+
+  const pixelPositions: Record<string, number> = {};
+  for (const [id, top] of Object.entries(value)) {
+    if (typeof top === "number") {
+      pixelPositions[id] = top;
+    }
+  }
+  return pixelPositions;
+}
+
 // Handle messages from iframe
 function handleIframeMessage(e: MessageEvent) {
   if (!isTrustedIframeMessage(e)) return;
+  if (!isRecord(e.data) || typeof e.data.type !== "string") return;
   const msg = e.data;
 
   switch (msg.type) {
-    case "selection:made":
+    case "selection:made": {
+      const selection = parseSelectionPayload(msg);
+      if (!selection) break;
+      setPendingSelection(selection.text, selection.anchor, selection.pixelY, selection.rect);
       sendMessage({
         type: "presence:update",
-        selection: { anchor: msg.anchor, text: msg.text },
+        selection: { anchor: selection.anchor, text: selection.text },
       });
+      renderSelectionToolbar();
       break;
+    }
+
+    case "selection:geometry": {
+      const selection = parseSelectionPayload(msg);
+      if (!selection) break;
+      setPendingSelection(selection.text, selection.anchor, selection.pixelY, selection.rect);
+      renderSelectionToolbar();
+      break;
+    }
 
     case "selection:clear":
+      if (!composeAnchor) {
+        clearPendingSelection();
+      }
       sendMessage({
         type: "presence:update",
         selection: undefined,
       });
       break;
 
-    case "comment:start":
-      if (msg.content) {
-        // Mobile: comment submitted inline, create directly
-        sendMessage({
-          type: "comment:create",
-          id: generateId(),
-          content: msg.content,
-          anchor: msg.anchor,
-          parent_id: null,
-        });
-      } else {
-        openCompose(msg.text, msg.anchor, msg.pixelY || 0);
-      }
-      break;
-
     case "highlight:click":
+      if (typeof msg.commentId !== "string") break;
       scrollToComment(msg.commentId);
       break;
 
@@ -619,8 +1231,9 @@ function handleIframeMessage(e: MessageEvent) {
 
     case "highlights:states":
       {
-        const nextHiddenIds = new Set(msg.hidden || []);
-        const nextOrphanedIds = new Set(msg.orphaned || []);
+        if (!Array.isArray(msg.hidden) || !Array.isArray(msg.orphaned)) break;
+        const nextHiddenIds = new Set(msg.hidden.filter((id): id is string => typeof id === "string"));
+        const nextOrphanedIds = new Set(msg.orphaned.filter((id): id is string => typeof id === "string"));
         const statesChanged =
           !setsEqual(hiddenAnnotationIds, nextHiddenIds) ||
           !setsEqual(orphanedAnnotationIds, nextOrphanedIds);
@@ -633,8 +1246,9 @@ function handleIframeMessage(e: MessageEvent) {
       break;
 
     case "highlights:positions": {
-      const nextPixelPositions = msg.pixelPositions || {};
-      if (msg.scrollHeight) iframeScrollHeight = msg.scrollHeight;
+      if (!isRecord(msg.pixelPositions) || typeof msg.scrollHeight !== "number") break;
+      const nextPixelPositions = parsePixelPositions(msg.pixelPositions);
+      iframeScrollHeight = msg.scrollHeight;
       const nextAnimatedHighlights = Boolean(msg.animating);
       let shouldRender = false;
 
@@ -669,7 +1283,11 @@ function handleIframeMessage(e: MessageEvent) {
     }
 
     case "iframe:scroll":
+      if (typeof msg.scrollHeight !== "number" || typeof msg.scrollTop !== "number") break;
       iframeScrollHeight = msg.scrollHeight;
+      if (pendingSelection) {
+        positionSelectionToolbar();
+      }
       // On mobile, sidebar is overlay — don't sync scroll
       if (window.innerWidth <= 768) break;
       updateSidebarSpacer();
@@ -681,13 +1299,8 @@ function handleIframeMessage(e: MessageEvent) {
       }
       break;
 
-    case "reaction:add":
-      sendMessage({
-        type: "reaction:add",
-        id: generateId(),
-        emoji: msg.emoji,
-        anchor: msg.anchor,
-      });
+    case "document:open-link":
+      openDocumentLink(msg.href);
       break;
   }
 }
@@ -821,7 +1434,7 @@ function renderComments() {
   const toggleText = sidebarToggle.querySelector(".sidebar-toggle-text");
   if (toggleText) toggleText.textContent = totalItems > 0 ? "comments \u{00B7} " + totalItems : "comments";
   filterResolved.textContent = showResolved ? "hide resolved" : "resolved (" + resolvedCount + ")";
-  (filterResolved as HTMLElement).style.display = resolvedCount > 0 ? "" : "none";
+  filterResolved.style.display = resolvedCount > 0 ? "" : "none";
 
   if (
     visibleComments.length === 0 &&
@@ -1148,7 +1761,6 @@ function createReactionCard(group: ReactionGroup) {
 
   return card;
 }
-
 function createCommentCard(comment: Comment) {
   const card = document.createElement("div");
   card.className =
@@ -1250,11 +1862,10 @@ function createCommentCard(comment: Comment) {
 
   // Click card to highlight in doc
   card.addEventListener("click", (e) => {
-    if (
-      (e.target as Element).closest(".comment-action") ||
-      (e.target as Element).closest(".reply-compose")
-    )
+    const target = e.target;
+    if (target instanceof Element && (target.closest(".comment-action") || target.closest(".reply-compose"))) {
       return;
+    }
     activeCommentId = comment.id;
     sendToIframe({ type: "highlight:activate", commentId: comment.id });
     if (window.innerWidth <= 768) {
@@ -1400,6 +2011,7 @@ function createComposeForm() {
     composeAnchor = null;
     composeText = "";
     composePixelY = 0;
+    clearPendingSelection();
     renderComments();
   });
 
@@ -1443,7 +2055,10 @@ function openSidebar(): boolean {
       sendToIframe({ type: "scroll:to", scrollTop: savedScrollTop });
       iframeScrollTop = savedScrollTop;
       sendToIframe({ type: "highlights:request" });
+      requestSelectionRefresh();
     }, { once: true });
+  } else {
+    requestSelectionRefresh();
   }
   return wasCollapsed;
 }
@@ -1452,6 +2067,7 @@ function openCompose(text: string, anchor: Anchor, pixelY = 0) {
   composeText = text;
   composeAnchor = anchor;
   composePixelY = pixelY;
+  clearPendingSelection();
   updateHighlights();
   sendToIframe({ type: "highlight:activate", commentId: "__compose__" });
   const wasCollapsed = openSidebar();
@@ -1469,28 +2085,28 @@ function scrollToComment(commentId: string) {
 
 function updateHighlights() {
   const topLevel = comments.filter((c) => !c.parent_id);
-  // Build highlight items from both comments and reactions
+  const commentItems: AnnotationHighlightItem[] = topLevel
+    .filter((comment): comment is Comment & { anchor: Anchor } => comment.anchor !== null)
+    .map((comment) => ({ id: comment.id, anchor: comment.anchor, resolved: comment.resolved }));
   const reactionItems = buildReactionHighlightItems();
-  // Include compose anchor as a pending highlight
-  const items = [...topLevel, ...reactionItems];
+  const items: AnnotationHighlightItem[] = [...commentItems, ...reactionItems];
   if (composeAnchor) {
-    items.push({ id: "__compose__", anchor: composeAnchor, resolved: false } as any);
+    items.push({ id: "__compose__", anchor: composeAnchor, resolved: false });
   }
   sendToIframe({
     type: "highlights:render",
     comments: items,
   });
-  // Check for orphaned comments after a short delay to let highlights render
   setTimeout(() => {
     sendToIframe({
       type: "highlights:check",
-      comments: [...topLevel, ...reactionItems],
+      comments: [...commentItems, ...reactionItems],
     });
   }, 100);
 }
 
-function buildReactionHighlightItems() {
-  const grouped = new Map<string, { id: string; anchor: Anchor; resolved: boolean }>();
+function buildReactionHighlightItems(): AnnotationHighlightItem[] {
+  const grouped = new Map<string, AnnotationHighlightItem>();
   for (const r of reactions) {
     const key = reactionAnchorKey(r.anchor);
     if (!key) continue;

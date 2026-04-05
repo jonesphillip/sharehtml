@@ -5,3 +5,4 @@ interface ImportMeta {
     readonly MODE: string;
   };
 }
+

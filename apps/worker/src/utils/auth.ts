@@ -7,7 +7,10 @@ import type { AppBindings } from "../types.js";
 export interface AuthUser {
   id: string;
   email: string;
+  source: AuthSource;
 }
+
+export type AuthSource = "access-jwt-header" | "cf-access-token" | "cookie" | "dev";
 
 let jwksCache: { teamName: string; jwks: ReturnType<typeof createRemoteJWKSet> } | null = null;
 
@@ -23,13 +26,23 @@ function getJWKS(teamName: string) {
   return jwksCache.jwks;
 }
 
-function getAccessJWT(c: Context): string | null {
-  return (
-    c.req.header("CF-Access-JWT-Assertion") ||
-    c.req.header("cf-access-token") ||
-    getCookie(c, "CF_Authorization") ||
-    null
-  );
+function getAccessJWT(c: Context): { jwt: string | null; source: AuthSource | null } {
+  const accessJwtHeader = c.req.header("CF-Access-JWT-Assertion");
+  if (accessJwtHeader) {
+    return { jwt: accessJwtHeader, source: "access-jwt-header" };
+  }
+
+  const accessTokenHeader = c.req.header("cf-access-token");
+  if (accessTokenHeader) {
+    return { jwt: accessTokenHeader, source: "cf-access-token" };
+  }
+
+  const accessCookie = getCookie(c, "CF_Authorization");
+  if (accessCookie) {
+    return { jwt: accessCookie, source: "cookie" };
+  }
+
+  return { jwt: null, source: null };
 }
 
 async function verifyAccessJWT(jwt: string, env: Env): Promise<AuthUser | null> {
@@ -65,13 +78,13 @@ async function verifyAccessJWT(jwt: string, env: Env): Promise<AuthUser | null> 
 export const authMiddleware = createMiddleware<AppBindings>(async (c, next) => {
   // Fail closed: only skip auth when explicitly set to "none"
   if (c.env.AUTH_MODE === "none") {
-    c.set("authUser", { id: "dev", email: "dev@localhost" });
+    c.set("authUser", { id: "dev", email: "dev@localhost", source: "dev" });
     await next();
     return;
   }
 
-  const jwt = getAccessJWT(c);
-  if (!jwt) {
+  const { jwt, source } = getAccessJWT(c);
+  if (!jwt || !source) {
     return c.text("Unauthorized", 401);
   }
 
@@ -80,6 +93,6 @@ export const authMiddleware = createMiddleware<AppBindings>(async (c, next) => {
     return c.text("Unauthorized", 401);
   }
 
-  c.set("authUser", user);
+  c.set("authUser", { ...user, source });
   await next();
 });

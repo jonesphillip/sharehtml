@@ -1,8 +1,10 @@
 import { defineConfig } from "vite";
 import { cloudflare } from "@cloudflare/vite-plugin";
 
+const disableInspector = process.env.PLAYWRIGHT === "1";
+
 export default defineConfig({
-  plugins: [cloudflare()],
+  plugins: [cloudflare({ inspectorPort: disableInspector ? false : undefined })],
   build: {
     manifest: "manifest.json",
     rollupOptions: {
