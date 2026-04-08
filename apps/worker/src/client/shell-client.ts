@@ -272,6 +272,27 @@ function getSelectionAnchorViewportRect() {
   };
 }
 
+function getSelectionOverlaySafeTop(): number {
+  const topbar = document.querySelector(".topbar");
+  if (!(topbar instanceof HTMLElement)) {
+    return 8;
+  }
+
+  return topbar.getBoundingClientRect().bottom + 8;
+}
+
+function isSelectionAnchorVisible(anchor: { top: number; bottom: number }): boolean {
+  const safeTop = getSelectionOverlaySafeTop();
+  const safeBottom = window.innerHeight - 8;
+  return anchor.bottom > safeTop && anchor.top < safeBottom;
+}
+
+function setSelectionOverlayVisibility(element: HTMLElement | null, visible: boolean): void {
+  if (!element) return;
+  element.style.visibility = visible ? "visible" : "hidden";
+  element.style.pointerEvents = visible ? "" : "none";
+}
+
 function getMobileSelectionSource(): SelectionPayload | null {
   return mobileSelectionFocus ?? pendingSelection;
 }
@@ -287,14 +308,25 @@ function setMobileSelectionState(
 function positionSelectionEmojiPicker() {
   if (!selectionEmojiPicker) return;
   const anchor = getSelectionAnchorViewportRect();
-  if (!anchor) return;
+  if (!anchor || !isSelectionAnchorVisible(anchor)) {
+    setSelectionOverlayVisibility(selectionEmojiPicker, false);
+    return;
+  }
+  setSelectionOverlayVisibility(selectionEmojiPicker, true);
 
+  const safeTop = getSelectionOverlaySafeTop();
   const toolbarRect = selectionToolbar?.getBoundingClientRect();
   const pickerRect = selectionEmojiPicker.getBoundingClientRect();
   const baseTop = toolbarRect
     ? toolbarRect.top - pickerRect.height - 4
     : anchor.top - pickerRect.height - (34 + SELECTION_TOOLBAR_GAP_PX);
-  const top = baseTop >= 8 ? baseTop : anchor.bottom + 34 + SELECTION_TOOLBAR_GAP_PX;
+  const fallbackTop = toolbarRect
+    ? toolbarRect.bottom + 4
+    : anchor.bottom + 34 + SELECTION_TOOLBAR_GAP_PX;
+  const top = Math.min(
+    Math.max(safeTop, baseTop >= safeTop ? baseTop : fallbackTop),
+    window.innerHeight - pickerRect.height - 8,
+  );
   const left = Math.min(
     Math.max(8, anchor.centerX - pickerRect.width / 2),
     window.innerWidth - pickerRect.width - 8,
@@ -307,14 +339,20 @@ function positionSelectionToolbar() {
   if (isMobileViewport()) return;
   if (!selectionToolbar) return;
   const anchor = getSelectionAnchorViewportRect();
-  if (!anchor) return;
+  if (!anchor || !isSelectionAnchorVisible(anchor)) {
+    setSelectionOverlayVisibility(selectionToolbar, false);
+    setSelectionOverlayVisibility(selectionEmojiPicker, false);
+    return;
+  }
+  setSelectionOverlayVisibility(selectionToolbar, true);
 
+  const safeTop = getSelectionOverlaySafeTop();
   const toolbarRect = selectionToolbar.getBoundingClientRect();
-  const preferredTop = anchor.top >= toolbarRect.height + SELECTION_TOOLBAR_GAP_PX
+  const preferredTop = anchor.top >= safeTop + toolbarRect.height + SELECTION_TOOLBAR_GAP_PX
     ? anchor.top - toolbarRect.height - SELECTION_TOOLBAR_GAP_PX
     : anchor.bottom + SELECTION_TOOLBAR_GAP_PX;
   const top = Math.min(
-    Math.max(8, preferredTop),
+    Math.max(safeTop, preferredTop),
     window.innerHeight - toolbarRect.height - 8,
   );
   const left = Math.min(
