@@ -2,6 +2,10 @@ import type { Context } from "hono";
 import type { AppBindings } from "../src/types.js";
 import { createCapabilityToken, verifyCapabilityToken } from "../src/utils/capability.js";
 import { requireHomeBrowserCapability, requireViewerBrowserCapability } from "../src/utils/request-security.js";
+import {
+  WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX,
+  WEBSOCKET_SUBPROTOCOL,
+} from "../src/utils/security-constants.js";
 
 function createEnv(): Env {
   return {
@@ -80,6 +84,21 @@ describe("browser capability enforcement", () => {
       email: "user@example.com",
       documentId: "doc-2",
     })).resolves.toBe(false);
+  });
+
+  it("verifies capability tokens case-insensitively for email bindings", async () => {
+    const env = createEnv();
+    const token = await createCapabilityToken(env, {
+      scope: "viewer",
+      email: "User@Example.com",
+      documentId: "doc-1",
+    });
+
+    await expect(verifyCapabilityToken(env, token, {
+      scope: "viewer",
+      email: "user@example.com",
+      documentId: "doc-1",
+    })).resolves.toBe(true);
   });
 
   it("rejects cookie-auth browser requests without a capability token", async () => {
@@ -285,7 +304,7 @@ describe("browser capability enforcement", () => {
     await expect(response?.text()).resolves.toBe("Forbidden");
   });
 
-  it("does not accept query-param capability tokens on normal viewer routes", async () => {
+  it("does not accept websocket protocol capability tokens on normal viewer routes", async () => {
     const env = createEnv();
     const token = await createCapabilityToken(env, {
       scope: "viewer",
@@ -295,7 +314,9 @@ describe("browser capability enforcement", () => {
 
     const response = await requireViewerBrowserCapability(
       createContext({
-        url: `https://example.com/api/documents/doc-1?cap=${encodeURIComponent(token)}`,
+        headers: {
+          "Sec-WebSocket-Protocol": `${WEBSOCKET_SUBPROTOCOL}, ${WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX}${token}`,
+        },
         authUser: { email: "user@example.com", source: "cookie" },
       }),
       "doc-1",
@@ -305,7 +326,7 @@ describe("browser capability enforcement", () => {
     expect(response?.status).toBe(403);
   });
 
-  it("accepts query-param capability tokens on websocket routes only", async () => {
+  it("accepts websocket protocol capability tokens on websocket routes only", async () => {
     const env = createEnv();
     const token = await createCapabilityToken(env, {
       scope: "viewer",
@@ -315,15 +336,15 @@ describe("browser capability enforcement", () => {
 
     const response = await requireViewerBrowserCapability(
       createContext({
-        url: `https://example.com/d/doc-1/ws?cap=${encodeURIComponent(token)}`,
         headers: {
           Origin: "https://example.com",
           Host: "example.com",
+          "Sec-WebSocket-Protocol": `${WEBSOCKET_SUBPROTOCOL}, ${WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX}${token}`,
         },
         authUser: { email: "user@example.com", source: "cookie" },
       }),
       "doc-1",
-      { requireOrigin: true, responseType: "text", allowQueryCapability: true },
+      { requireOrigin: true, responseType: "text", allowWebSocketProtocolCapability: true },
     );
 
     expect(response).toBeNull();

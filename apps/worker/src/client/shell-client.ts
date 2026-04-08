@@ -2,7 +2,11 @@ import "./styles.css";
 
 import type { Anchor, Comment, Reaction, Selector, ServerMessage, UserPresence } from "@sharehtml/shared";
 import { isRecord } from "../types.js";
-import { BROWSER_CAPABILITY_HEADER, WEBSOCKET_CAPABILITY_QUERY_PARAM } from "../utils/security-constants.js";
+import {
+  BROWSER_CAPABILITY_HEADER,
+  WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX,
+  WEBSOCKET_SUBPROTOCOL,
+} from "../utils/security-constants.js";
 
 type AuthMode = "access" | "none";
 type ShareMode = "private" | "link" | "emails";
@@ -170,7 +174,6 @@ const shareEmailAdd = getRequiredElementById("share-email-add", HTMLButtonElemen
 const shareEmailList = getRequiredElementById("share-email-list", HTMLDivElement);
 const sidebarBackdrop = getRequiredElementById("sidebar-backdrop", HTMLDivElement);
 const SANDBOXED_IFRAME_ORIGIN = "null";
-const DOCUMENT_SANDBOX_CSP = "sandbox allow-scripts";
 
 hiddenSectionHost.className = "sidebar-hidden-host";
 sidebar.appendChild(hiddenSectionHost);
@@ -635,29 +638,13 @@ function injectTag(html: string, tag: string, beforeCloseTag: string): string {
   return html + tag;
 }
 
-function injectIntoDocumentHead(html: string, tag: string): string {
-  if (html.includes("</head>")) {
-    return injectTag(html, tag, "</head>");
-  }
-  if (html.includes("<head>")) {
-    return html.replace("<head>", `<head>${tag}`);
-  }
-  if (html.includes("<html")) {
-    return html.replace(/<html[^>]*>/, `$&<head>${tag}</head>`);
-  }
-  return `<head>${tag}</head>${html}`;
-}
-
 function escapeInlineScript(script: string): string {
   return script.replace(/<\/script/gi, "<\\/script");
 }
 
 function injectDocumentRuntime(html: string, collabScriptText: string): string {
-  const sandboxMeta =
-    `<meta http-equiv="Content-Security-Policy" content="${DOCUMENT_SANDBOX_CSP}">`;
   const collabScript = `<script type="module">${escapeInlineScript(collabScriptText)}</script>`;
-  const htmlWithSandbox = injectIntoDocumentHead(html, sandboxMeta);
-  return injectTag(htmlWithSandbox, collabScript, "</body>");
+  return injectTag(html, collabScript, "</body>");
 }
 
 function renderIframeError(message: string) {
@@ -1060,8 +1047,8 @@ let lastPong = 0;
 function connectWs() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = new URL(protocol + "//" + location.host + "/d/" + DOC_ID + "/ws");
-  wsUrl.searchParams.set(WEBSOCKET_CAPABILITY_QUERY_PARAM, VIEWER_CAPABILITY_TOKEN);
-  ws = new WebSocket(wsUrl.toString());
+  const capabilityProtocol = `${WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX}${VIEWER_CAPABILITY_TOKEN}`;
+  ws = new WebSocket(wsUrl.toString(), [WEBSOCKET_SUBPROTOCOL, capabilityProtocol]);
 
   ws.addEventListener("open", () => {
     reconnectAttempts = 0;

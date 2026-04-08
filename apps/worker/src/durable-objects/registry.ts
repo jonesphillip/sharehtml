@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DocumentRow, RecentViewRow, UserRow } from "../types.js";
+import { normalizeEmail } from "../utils/email.js";
 
 const USER_COLORS = [
   "#e11d48",
@@ -103,27 +104,29 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   async getUser(email: string): Promise<UserRow | null> {
+    const normalizedEmail = normalizeEmail(email);
     const rows = this.sql
-      .exec<UserRow>("SELECT email, display_name, color FROM users WHERE email = ?", email)
+      .exec<UserRow>("SELECT email, display_name, color FROM users WHERE lower(email) = ?", normalizedEmail)
       .toArray();
     if (rows.length === 0) return null;
     return rows[0];
   }
 
   async setUser(email: string, displayName: string): Promise<UserRow> {
+    const normalizedEmail = normalizeEmail(email);
     const existing = await this.getUser(email);
     if (existing) {
-      this.sql.exec("UPDATE users SET display_name = ? WHERE email = ?", displayName, email);
+      this.sql.exec("UPDATE users SET display_name = ? WHERE email = ?", displayName, existing.email);
       return { ...existing, display_name: displayName };
     }
     const color = this.pickColor();
     this.sql.exec(
       "INSERT INTO users (email, display_name, color) VALUES (?, ?, ?)",
-      email,
+      normalizedEmail,
       displayName,
       color,
     );
-    return { email, display_name: displayName, color };
+    return { email: normalizedEmail, display_name: displayName, color };
   }
 
   async createDocument(doc: {
@@ -144,7 +147,7 @@ export class RegistryDO extends DurableObject<Env> {
       doc.title,
       doc.filename,
       doc.size,
-      doc.owner_email,
+      normalizeEmail(doc.owner_email),
       doc.is_shared,
       doc.rendered_filename ?? null,
       doc.source_filename ?? null,
@@ -160,10 +163,11 @@ export class RegistryDO extends DurableObject<Env> {
 
   async listDocuments(ownerEmail?: string): Promise<DocumentRow[]> {
     if (ownerEmail) {
+      const normalizedOwnerEmail = normalizeEmail(ownerEmail);
       return this.sql
         .exec<DocumentRow>(
-          "SELECT * FROM documents WHERE owner_email = ? ORDER BY created_at DESC LIMIT 500",
-          ownerEmail,
+          "SELECT * FROM documents WHERE lower(owner_email) = ? ORDER BY created_at DESC LIMIT 500",
+          normalizedOwnerEmail,
         )
         .toArray();
     }
@@ -175,8 +179,8 @@ export class RegistryDO extends DurableObject<Env> {
     options: { query?: string; limit: number; page: number },
   ): Promise<{ documents: DocumentRow[]; totalCount: number; page: number }> {
     const searchQuery = options.query?.trim() || "";
-    const params: Array<string | number> = [ownerEmail];
-    let whereClause = "owner_email = ?";
+    const params: Array<string | number> = [normalizeEmail(ownerEmail)];
+    let whereClause = "lower(owner_email) = ?";
 
     if (searchQuery) {
       whereClause += " AND (title LIKE ? ESCAPE '\\' OR filename LIKE ? ESCAPE '\\')";
@@ -222,7 +226,7 @@ export class RegistryDO extends DurableObject<Env> {
     match: "source" | "rendered" | "any" = "any",
   ): Promise<DocumentRow | null> {
     let whereClause = "";
-    const parameters: string[] = [ownerEmail];
+    const parameters: string[] = [normalizeEmail(ownerEmail)];
 
     if (match === "source") {
       whereClause = "source_filename = ? OR (source_filename IS NULL AND filename = ?)";
@@ -238,7 +242,7 @@ export class RegistryDO extends DurableObject<Env> {
     const rows = this.sql
       .exec<DocumentRow>(
         `SELECT * FROM documents
-         WHERE owner_email = ?
+         WHERE lower(owner_email) = ?
            AND (${whereClause})
          LIMIT 1`,
         ...parameters,
@@ -301,19 +305,20 @@ export class RegistryDO extends DurableObject<Env> {
   async recordView(userEmail: string, docId: string) {
     this.sql.exec(
       "INSERT INTO views (user_email, doc_id, last_viewed_at) VALUES (?, ?, datetime('now')) ON CONFLICT(user_email, doc_id) DO UPDATE SET last_viewed_at = datetime('now')",
-      userEmail,
+      normalizeEmail(userEmail),
       docId,
     );
   }
 
   async getRecentViews(userEmail: string, limit = 20): Promise<RecentViewRow[]> {
+    const normalizedUserEmail = normalizeEmail(userEmail);
     return this.sql
       .exec<RecentViewRow>(
         `SELECT d.id, d.title, d.filename, d.size, d.owner_email, d.created_at, v.last_viewed_at
        FROM views v JOIN documents d ON v.doc_id = d.id
-       WHERE v.user_email = ?
+       WHERE lower(v.user_email) = ?
        ORDER BY v.last_viewed_at DESC LIMIT ?`,
-        userEmail,
+        normalizedUserEmail,
         limit,
       )
       .toArray();

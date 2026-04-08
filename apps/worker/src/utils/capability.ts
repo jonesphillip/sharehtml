@@ -1,7 +1,16 @@
 import { isRecord } from "../types.js";
-import { BROWSER_CAPABILITY_HEADER, WEBSOCKET_CAPABILITY_QUERY_PARAM } from "./security-constants.js";
+import { normalizeEmail } from "./email.js";
+import {
+  BROWSER_CAPABILITY_HEADER,
+  WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX,
+  WEBSOCKET_SUBPROTOCOL,
+} from "./security-constants.js";
 
-export { BROWSER_CAPABILITY_HEADER, WEBSOCKET_CAPABILITY_QUERY_PARAM };
+export {
+  BROWSER_CAPABILITY_HEADER,
+  WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX,
+  WEBSOCKET_SUBPROTOCOL,
+};
 
 export type CapabilityScope = "home" | "viewer";
 
@@ -109,7 +118,7 @@ export async function createCapabilityToken(
   const payload: CapabilityPayload = {
     v: 1,
     scope,
-    email,
+    email: normalizeEmail(email),
     documentId,
     exp: Math.floor(Date.now() / 1000) + ttlSeconds,
     nonce: crypto.randomUUID(),
@@ -144,7 +153,7 @@ export async function verifyCapabilityToken(
   const payload = parsePayload(new TextDecoder().decode(payloadBytes));
   if (!payload) return false;
   if (payload.scope !== scope) return false;
-  if (payload.email !== email) return false;
+  if (payload.email !== normalizeEmail(email)) return false;
   if (payload.documentId !== documentId) return false;
   if (payload.exp < Math.floor(Date.now() / 1000)) return false;
   return true;

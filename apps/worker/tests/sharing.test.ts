@@ -50,6 +50,12 @@ describe("Share mode data layer", () => {
 // In AUTH_MODE=none, the authenticated user is always dev@localhost.
 // We test access control by creating docs owned by a different email.
 describe("Access control honors share modes", () => {
+  it("treats mixed-case owner emails as the same owner", async () => {
+    await createDoc("owner-case", "Dev@Localhost", 0);
+    const res = await exports.default.fetch("https://example.com/d/owner-case");
+    expect(res.status).toBe(200);
+  });
+
   it("private doc: owner can view, others cannot", async () => {
     // Doc owned by dev@localhost (the test user) → accessible
     await createDoc("own-private", "dev@localhost", 0);

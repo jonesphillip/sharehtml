@@ -18,17 +18,21 @@ export async function getRenderedObject(
   doc: Pick<DocumentRow, "filename" | "rendered_filename">,
 ): Promise<R2ObjectBody | null> {
   const renderedFilename = doc.rendered_filename || doc.filename;
+  const legacyKey = getLegacyDocumentKey(id, renderedFilename);
   const preferredKey = doc.rendered_filename
     ? getRenderedDocumentKey(id, renderedFilename)
-    : getLegacyDocumentKey(id, renderedFilename);
+    : legacyKey;
 
   const preferredObject = await bucket.get(preferredKey);
   if (preferredObject) {
     return preferredObject;
   }
 
-  if (preferredKey !== getLegacyDocumentKey(id, renderedFilename)) {
-    return bucket.get(getLegacyDocumentKey(id, renderedFilename));
+  if (preferredKey !== legacyKey) {
+    const legacyObject = await bucket.get(legacyKey);
+    if (legacyObject) {
+      return legacyObject;
+    }
   }
 
   return null;

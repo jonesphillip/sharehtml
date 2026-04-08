@@ -7,6 +7,7 @@ import { getRegistry } from "../utils/registry.js";
 import { findAnchorRangeInText, getElementSelector, rebuildAnchor } from "../utils/anchors.js";
 import { collectAnnotatableElementsFromHtml, remapElementAnchor } from "../utils/document-elements.js";
 import { diffText, mapRangeThroughDiff } from "../utils/text-diff.js";
+import { WEBSOCKET_SUBPROTOCOL } from "../utils/security-constants.js";
 
 const clientMessageTypes = new Set<string>([
   "user:join", "user:set_name", "presence:update",
@@ -44,6 +45,13 @@ function parseAttachment(raw: unknown): WsAttachment | null {
 function parseVerifiedEmail(raw: unknown): string | undefined {
   if (!isRecord(raw)) return undefined;
   return typeof raw.verifiedEmail === "string" ? raw.verifiedEmail : undefined;
+}
+
+function getSelectedWebSocketProtocol(header: string | null): string | null {
+  if (!header) return null;
+
+  const protocols = header.split(",").map((value) => value.trim()).filter(Boolean);
+  return protocols.includes(WEBSOCKET_SUBPROTOCOL) ? WEBSOCKET_SUBPROTOCOL : null;
 }
 
 export class DocumentDO extends DurableObject<Env> {
@@ -178,13 +186,20 @@ export class DocumentDO extends DurableObject<Env> {
         return new Response("Expected WebSocket", { status: 426 });
       }
       const verifiedEmail = request.headers.get("X-Verified-Email") || undefined;
+      const selectedProtocol = getSelectedWebSocketProtocol(
+        request.headers.get("Sec-WebSocket-Protocol"),
+      );
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
       // Store verified email from Access JWT so handleUserJoin can enforce it
       if (verifiedEmail) {
         pair[1].serializeAttachment({ verifiedEmail });
       }
-      return new Response(null, { status: 101, webSocket: pair[0] });
+      const headers = new Headers();
+      if (selectedProtocol) {
+        headers.set("Sec-WebSocket-Protocol", selectedProtocol);
+      }
+      return new Response(null, { status: 101, headers, webSocket: pair[0] });
     }
 
     if (url.pathname.endsWith("/comments") && request.method === "GET") {

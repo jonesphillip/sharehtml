@@ -2,12 +2,15 @@ import type { Context } from "hono";
 import type { AppBindings } from "../types.js";
 import type { AuthSource } from "./auth.js";
 import { type CapabilityScope, verifyCapabilityToken } from "./capability.js";
-import { BROWSER_CAPABILITY_HEADER, WEBSOCKET_CAPABILITY_QUERY_PARAM } from "./security-constants.js";
+import {
+  BROWSER_CAPABILITY_HEADER,
+  WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX,
+} from "./security-constants.js";
 
 type CapabilityResponseType = "json" | "text";
 
 interface CapabilityLookupOptions {
-  allowQueryParam?: boolean;
+  allowWebSocketProtocol?: boolean;
 }
 
 interface BrowserCapabilityOptions {
@@ -15,7 +18,7 @@ interface BrowserCapabilityOptions {
   documentId: string | null;
   requireOrigin: boolean;
   responseType?: CapabilityResponseType;
-  allowQueryCapability?: boolean;
+  allowWebSocketProtocolCapability?: boolean;
 }
 
 interface CapabilityRouteOptions {
@@ -24,7 +27,7 @@ interface CapabilityRouteOptions {
 }
 
 interface ViewerCapabilityRouteOptions extends CapabilityRouteOptions {
-  allowQueryCapability?: boolean;
+  allowWebSocketProtocolCapability?: boolean;
 }
 
 function isExplicitHeaderAuthSource(source: AuthSource): boolean {
@@ -41,12 +44,25 @@ function isUnsafeMethod(method: string): boolean {
 
 function getCapabilityFromRequest(
   c: Context<AppBindings>,
-  { allowQueryParam = false }: CapabilityLookupOptions = {},
+  { allowWebSocketProtocol = false }: CapabilityLookupOptions = {},
 ): string | null {
   const headerToken = c.req.header(BROWSER_CAPABILITY_HEADER);
   if (headerToken) return headerToken;
-  if (!allowQueryParam) return null;
-  return c.req.query(WEBSOCKET_CAPABILITY_QUERY_PARAM) || null;
+  if (!allowWebSocketProtocol) return null;
+  return getCapabilityFromWebSocketProtocol(c.req.header("Sec-WebSocket-Protocol"));
+}
+
+function getCapabilityFromWebSocketProtocol(header: string | undefined): string | null {
+  if (!header) return null;
+
+  const protocols = header.split(",").map((value) => value.trim()).filter(Boolean);
+  for (const protocol of protocols) {
+    if (!protocol.startsWith(WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX)) continue;
+    const token = protocol.slice(WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX.length);
+    if (token) return token;
+  }
+
+  return null;
 }
 
 function originHostMatchesRequest(c: Context<AppBindings>): boolean {
@@ -77,6 +93,21 @@ function createForbiddenResponse(
   return c.json({ error: "forbidden" }, 403);
 }
 
+function logSecurityWarning(
+  c: Context<AppBindings>,
+  event: string,
+  details: Record<string, unknown>,
+): void {
+  console.warn({
+    level: "warn",
+    event,
+    timestamp: new Date().toISOString(),
+    method: c.req.method,
+    url: c.req.url,
+    ...details,
+  });
+}
+
 export async function requireBrowserCapability(
   c: Context<AppBindings>,
   {
@@ -84,7 +115,7 @@ export async function requireBrowserCapability(
     documentId,
     requireOrigin,
     responseType = "json",
-    allowQueryCapability = false,
+    allowWebSocketProtocolCapability = false,
   }: BrowserCapabilityOptions,
 ): Promise<Response | null> {
   const authUser = c.get("authUser");
@@ -94,9 +125,7 @@ export async function requireBrowserCapability(
 
   if (authUser.source === "dev") {
     if (requireOrigin && c.req.header("Origin") && !originHostMatchesRequest(c)) {
-      console.warn("blocked_dev_request_invalid_origin", {
-        url: c.req.url,
-        method: c.req.method,
+      logSecurityWarning(c, "blocked_dev_request_invalid_origin", {
         origin: c.req.header("Origin"),
         host: c.req.header("Host") || new URL(c.req.url).host,
       });
@@ -110,24 +139,22 @@ export async function requireBrowserCapability(
   }
 
   if (requireOrigin && !originHostMatchesRequest(c)) {
-    console.warn("blocked_browser_request_invalid_origin", {
-      url: c.req.url,
-      method: c.req.method,
+    logSecurityWarning(c, "blocked_browser_request_invalid_origin", {
       origin: c.req.header("Origin"),
       host: c.req.header("Host") || new URL(c.req.url).host,
     });
     return createForbiddenResponse(c, responseType);
   }
 
-  const token = getCapabilityFromRequest(c, { allowQueryParam: allowQueryCapability });
+  const token = getCapabilityFromRequest(c, {
+    allowWebSocketProtocol: allowWebSocketProtocolCapability,
+  });
   if (!token || !(await verifyCapabilityToken(c.env, token, {
     scope,
     email: authUser.email,
     documentId,
   }))) {
-    console.warn("blocked_browser_request_invalid_capability", {
-      url: c.req.url,
-      method: c.req.method,
+    logSecurityWarning(c, "blocked_browser_request_invalid_capability", {
       scope,
       documentId,
       authSource: authUser.source,
@@ -147,7 +174,7 @@ export async function requireHomeBrowserCapability(
     documentId: null,
     requireOrigin: options?.requireOrigin ?? isUnsafeMethod(c.req.method),
     responseType: options?.responseType,
-    allowQueryCapability: false,
+    allowWebSocketProtocolCapability: false,
   });
 }
 
@@ -161,6 +188,6 @@ export async function requireViewerBrowserCapability(
     documentId,
     requireOrigin: options?.requireOrigin ?? isUnsafeMethod(c.req.method),
     responseType: options?.responseType,
-    allowQueryCapability: options?.allowQueryCapability ?? false,
+    allowWebSocketProtocolCapability: options?.allowWebSocketProtocolCapability ?? false,
   });
 }

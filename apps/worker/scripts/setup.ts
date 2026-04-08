@@ -9,6 +9,116 @@ const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
 const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
 const R2_PRICING_URL = "https://developers.cloudflare.com/r2/pricing/#free-tier";
 
+type SelectOption = { label: string; value: string; selected: boolean };
+type AccessIncludeRule = Record<string, unknown>;
+type AccessPolicyRef = string | { id?: string; decision?: string };
+type AccessPolicy = {
+  id: string;
+  name?: string;
+  decision?: string;
+  include?: AccessIncludeRule[];
+  reusable?: boolean;
+};
+type AccessApp = {
+  id: string;
+  name?: string;
+  domain?: string;
+  aud?: string;
+  policies?: Array<AccessPolicyRef | AccessPolicy>;
+};
+type ExistingAccessState = {
+  rootApp: AccessApp | null;
+  rootPolicies: AccessPolicy[];
+};
+type SelectedPolicyState = {
+  policyIds: string[];
+  policyLabels: string[];
+  newIncludeRules: AccessIncludeRule[];
+  shouldSelectPolicies: boolean;
+};
+
+class CommandError extends Error {
+  stdout: string;
+  stderr: string;
+  outputText: string;
+
+  constructor(message: string, stdout: string, stderr: string) {
+    super(message);
+    this.name = "CommandError";
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.outputText = [stdout, stderr].filter(Boolean).join("\n").trim();
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function isAccessPolicy(value: unknown): value is AccessPolicy {
+  return isRecord(value) && typeof value.id === "string";
+}
+
+function isAccessApp(value: unknown): value is AccessApp {
+  return isRecord(value) && typeof value.id === "string";
+}
+
+function parseAccessPolicies(value: unknown): AccessPolicy[] {
+  return Array.isArray(value) ? value.filter(isAccessPolicy) : [];
+}
+
+function parseAccessPolicy(value: unknown): AccessPolicy | null {
+  return isAccessPolicy(value) ? value : null;
+}
+
+function parseAccessApps(value: unknown): AccessApp[] {
+  return Array.isArray(value) ? value.filter(isAccessApp) : [];
+}
+
+function parseAccessApp(value: unknown): AccessApp | null {
+  return isAccessApp(value) ? value : null;
+}
+
+function parseWorkersSubdomain(value: unknown): { subdomain: string } | null {
+  if (!isRecord(value) || typeof value.subdomain !== "string") return null;
+  return { subdomain: value.subdomain };
+}
+
+function parseAccessOrganization(value: unknown): { auth_domain: string } | null {
+  if (!isRecord(value) || typeof value.auth_domain !== "string") return null;
+  return { auth_domain: value.auth_domain };
+}
+
+function getCloudflareApiErrors(value: unknown): string[] {
+  if (!isRecord(value) || !Array.isArray(value.errors)) return [];
+
+  const messages: string[] = [];
+  for (const error of value.errors) {
+    if (!isRecord(error) || typeof error.message !== "string") continue;
+    messages.push(error.message);
+  }
+  return messages;
+}
+
+function getPolicyEmail(rule: unknown): string | null {
+  if (!isRecord(rule) || !isRecord(rule.email) || typeof rule.email.email !== "string") {
+    return null;
+  }
+  return rule.email.email;
+}
+
+function getPolicyEmailDomain(rule: unknown): string | null {
+  if (!isRecord(rule) || !isRecord(rule.email_domain) || typeof rule.email_domain.domain !== "string") {
+    return null;
+  }
+  return rule.email_domain.domain;
+}
+
 process.on("SIGINT", () => {
   process.stdout.write("\n");
   process.exit(1);
@@ -26,14 +136,19 @@ function prompt(question: string): Promise<string> {
 
 function promptSecret(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const origWrite = rl["_writeToOutput" as keyof typeof rl] as (s: string) => void;
-  (rl as any)._writeToOutput = (s: string) => {
+  const originalWrite = Reflect.get(rl, "_writeToOutput");
+  if (typeof originalWrite !== "function") {
+    rl.close();
+    return prompt(question);
+  }
+
+  Reflect.set(rl, "_writeToOutput", function writeMaskedOutput(s: string) {
     if (s.includes(question)) {
-      origWrite.call(rl, s);
+      originalWrite.call(rl, s);
     } else {
-      origWrite.call(rl, s.replace(/[^\r\n]/g, "*"));
+      originalWrite.call(rl, s.replace(/[^\r\n]/g, "*"));
     }
-  };
+  });
   return new Promise((resolve) => {
     rl.question(`  ${question} `, (answer) => {
       rl.close();
@@ -66,15 +181,11 @@ function run(cmd: string, args: string[], opts?: { input?: string; cwd?: string;
       env: opts?.env ? { ...process.env, ...opts.env } : undefined,
       maxBuffer: 10 * 1024 * 1024,
     }, (err, stdout, stderr) => {
-      const outputText = [stdout, stderr].filter(Boolean).join("\n").trim();
       if (err) {
-        (err as any).stdout = stdout;
-        (err as any).stderr = stderr;
-        (err as any).outputText = outputText;
-        reject(err);
+        reject(new CommandError(err.message, stdout, stderr));
         return;
       }
-      resolve(outputText);
+      resolve([stdout, stderr].filter(Boolean).join("\n").trim());
     });
     if (opts?.input) {
       child.stdin!.write(opts.input);
@@ -126,7 +237,7 @@ async function cfApi(
   method: string,
   path: string,
   body?: unknown,
-): Promise<any> {
+): Promise<unknown> {
   const resp = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
     method,
     headers: {
@@ -135,10 +246,10 @@ async function cfApi(
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const json = await resp.json();
-  if (!json.success) {
-    const msgs = json.errors?.map((e: any) => e.message).join(", ") || "Unknown error";
-    throw new Error(msgs);
+  const json: unknown = await resp.json();
+  if (!isRecord(json) || json.success !== true) {
+    const messages = getCloudflareApiErrors(json);
+    throw new Error(messages.join(", ") || "Unknown error");
   }
   return json.result;
 }
@@ -157,41 +268,41 @@ function isApiAccessDomain(domain: string | undefined, hostname: string): boolea
   );
 }
 
-function resolveAppPolicies(app: any, policies: any[]): any[] {
+function resolveAppPolicies(app: AccessApp, policies: AccessPolicy[]): AccessPolicy[] {
   if (!Array.isArray(app?.policies)) return [];
   return app.policies
-    .map((policy: any) => {
-      if (policy?.decision) return policy;
+    .map((policy) => {
+      if (isAccessPolicy(policy)) return policy;
       const id = typeof policy === "string" ? policy : policy?.id;
-      return policies.find((candidate: any) => candidate.id === id);
+      return policies.find((candidate) => candidate.id === id);
     })
-    .filter(Boolean);
+    .filter((policy): policy is AccessPolicy => Boolean(policy));
 }
 
-function policyIncludesEveryone(policy: any): boolean {
+function policyIncludesEveryone(policy: AccessPolicy): boolean {
   return (
     Array.isArray(policy?.include) &&
-    policy.include.some((rule: any) => typeof rule === "object" && rule !== null && "everyone" in rule)
+    policy.include.some((rule) => isRecord(rule) && "everyone" in rule)
   );
 }
 
-function isLegacyApiBypassApp(app: any, hostname: string, configName: string, policies: any[]): boolean {
+function isLegacyApiBypassApp(app: AccessApp, hostname: string, configName: string, policies: AccessPolicy[]): boolean {
   if (app?.name !== `${configName}-api`) return false;
   if (!isApiAccessDomain(app?.domain, hostname)) return false;
 
   const resolvedPolicies = resolveAppPolicies(app, policies);
   return (
     resolvedPolicies.length > 0 &&
-    resolvedPolicies.every((policy: any) => policy?.decision === "bypass") &&
+    resolvedPolicies.every((policy) => policy?.decision === "bypass") &&
     resolvedPolicies.some(policyIncludesEveryone)
   );
 }
 
-function getApiPathApps(apps: any[], hostname: string): any[] {
-  return apps.filter((app: any) => isApiAccessDomain(app?.domain, hostname));
+function getApiPathApps(apps: AccessApp[], hostname: string): AccessApp[] {
+  return apps.filter((app) => isApiAccessDomain(app?.domain, hostname));
 }
 
-function describePolicy(policy: any): string {
+function describePolicy(policy: AccessPolicy): string {
   const parts: string[] = [];
   const includes = Array.isArray(policy?.include) ? policy.include : [];
 
@@ -350,7 +461,7 @@ async function hasProductionSecret(name: string): Promise<boolean> {
       "json",
     ]);
     return parseSecretList(output).includes(name);
-  } catch (error: any) {
+  } catch (error: unknown) {
     const message = formatCommandError(error);
     if (shouldTreatSecretListFailureAsMissingWorker(message)) {
       return false;
@@ -372,32 +483,6 @@ async function ensureProductionSecret(name: string): Promise<"created" | "existi
   );
   return "created";
 }
-
-type SelectOption = { label: string; value: string; selected: boolean };
-type AccessPolicy = {
-  id: string;
-  name?: string;
-  decision?: string;
-  include?: Array<Record<string, unknown>>;
-  reusable?: boolean;
-};
-type AccessApp = {
-  id: string;
-  name?: string;
-  domain?: string;
-  aud?: string;
-  policies?: Array<string | AccessPolicy | { id?: string; decision?: string }>;
-};
-type ExistingAccessState = {
-  rootApp: AccessApp | null;
-  rootPolicies: AccessPolicy[];
-};
-type SelectedPolicyState = {
-  policyIds: string[];
-  policyLabels: string[];
-  newIncludeRules: Array<Record<string, unknown>>;
-  shouldSelectPolicies: boolean;
-};
 
 function multiSelect(title: string, options: SelectOption[]): Promise<SelectOption[]> {
   return new Promise((resolve) => {
@@ -473,17 +558,17 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-function formatCommandError(error: any): string {
-  const outputText = error?.outputText?.toString?.().trim();
-  if (outputText) return outputText;
+function formatCommandError(error: unknown): string {
+  if (error instanceof CommandError) {
+    if (error.outputText) return error.outputText;
+    return error.message;
+  }
 
-  const stderr = error?.stderr?.toString?.().trim();
-  if (stderr) return stderr;
+  if (error instanceof Error) {
+    return error.message;
+  }
 
-  const stdout = error?.stdout?.toString?.().trim();
-  if (stdout) return stdout;
-
-  return error?.message || String(error);
+  return String(error);
 }
 
 function isMissingR2Error(message: string): boolean {
@@ -529,11 +614,14 @@ async function loadAccessConfiguration(
   cfToken: string,
   accountId: string,
 ): Promise<{ existingPolicies: AccessPolicy[]; existingApps: AccessApp[] }> {
-  const [existingPolicies, existingApps] = await Promise.all([
+  const [rawPolicies, rawApps] = await Promise.all([
     cfApi(cfToken, "GET", `/accounts/${accountId}/access/policies`),
     cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps`),
   ]);
-  return { existingPolicies, existingApps };
+  return {
+    existingPolicies: parseAccessPolicies(rawPolicies),
+    existingApps: parseAccessApps(rawApps),
+  };
 }
 
 async function inspectExistingAccessState(
@@ -554,19 +642,23 @@ async function inspectExistingAccessState(
   const state = { rootApp: null as AccessApp | null, rootPolicies: [] as AccessPolicy[] };
   const s = spinner("Inspecting existing Access app...", true);
   try {
-    const [rootApp, rootPolicies] = await Promise.all([
+    const [rawRootApp, rawRootPolicies] = await Promise.all([
       cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps/${existingRootAppSummary.id}`),
       cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps/${existingRootAppSummary.id}/policies`).catch(
         () => [],
       ),
     ]);
+    const rootApp = parseAccessApp(rawRootApp);
+    if (!rootApp) {
+      throw new Error("invalid Access app response");
+    }
     state.rootApp = rootApp;
-    state.rootPolicies = rootPolicies;
+    state.rootPolicies = parseAccessPolicies(rawRootPolicies);
     s.stop("Existing Access app found");
     return state;
-  } catch (e: any) {
+  } catch (error: unknown) {
     s.stop();
-    fail(`Failed to inspect existing Access app: ${e.message}`);
+    fail(`Failed to inspect existing Access app: ${getErrorMessage(error)}`);
   }
 }
 
@@ -577,12 +669,10 @@ function buildPolicyOptions(
   const options: SelectOption[] = [];
 
   for (const policy of reusablePolicies) {
-    const emails = policy.include
-      ?.filter((rule: any) => rule.email)
-      .map((rule: any) => rule.email.email);
+    const emails = policy.include?.map(getPolicyEmail).filter((email): email is string => Boolean(email));
     const domains = policy.include
-      ?.filter((rule: any) => rule.email_domain)
-      .map((rule: any) => rule.email_domain.domain);
+      ?.map(getPolicyEmailDomain)
+      .filter((domain): domain is string => Boolean(domain));
     const parts = [...(emails ?? []), ...(domains ?? []).map((domain: string) => `*@${domain}`)];
     const detail = parts.length > 0 ? dim(` — ${parts.join(", ")}`) : "";
     options.push({
@@ -699,33 +789,47 @@ async function reconcileRootAccessApp(
   const policyIds = [...selectedPolicies.policyIds];
 
   if (selectedPolicies.shouldSelectPolicies && selectedPolicies.newIncludeRules.length > 0) {
-    const newPolicy = await cfApi(cfToken, "POST", `/accounts/${accountId}/access/policies`, {
+    const rawNewPolicy = await cfApi(cfToken, "POST", `/accounts/${accountId}/access/policies`, {
       name: `${appName}-allow`,
       decision: "allow",
       include: selectedPolicies.newIncludeRules,
       session_duration: "24h",
     });
+    const newPolicy = parseAccessPolicy(rawNewPolicy);
+    if (!newPolicy) {
+      throw new Error("invalid Access policy response");
+    }
     policyIds.push(newPolicy.id);
   }
 
   if (!existingRootApp) {
-    return cfApi(cfToken, "POST", `/accounts/${accountId}/access/apps`, {
+    const createdApp = await cfApi(cfToken, "POST", `/accounts/${accountId}/access/apps`, {
       name: appName,
       domain: hostname,
       type: "self_hosted",
       session_duration: "24h",
       policies: policyIds.map((id) => ({ id })),
     });
+    const parsedApp = parseAccessApp(createdApp);
+    if (!parsedApp) {
+      throw new Error("invalid Access app response");
+    }
+    return parsedApp;
   }
 
   if (!selectedPolicies.shouldSelectPolicies) {
     return existingRootApp;
   }
 
-  return cfApi(cfToken, "PUT", `/accounts/${accountId}/access/apps/${existingRootApp.id}`, {
+  const updatedApp = await cfApi(cfToken, "PUT", `/accounts/${accountId}/access/apps/${existingRootApp.id}`, {
     ...existingRootApp,
     policies: policyIds.map((id) => ({ id })),
   });
+  const parsedApp = parseAccessApp(updatedApp);
+  if (!parsedApp) {
+    throw new Error("invalid Access app response");
+  }
+  return parsedApp;
 }
 
 async function migrateLegacyApiAccessApp(
@@ -743,8 +847,11 @@ async function migrateLegacyApiAccessApp(
   }
 
   const apiPathApp = apiPathApps[0].id
-    ? await cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps/${apiPathApps[0].id}`)
+    ? parseAccessApp(await cfApi(cfToken, "GET", `/accounts/${accountId}/access/apps/${apiPathApps[0].id}`))
     : apiPathApps[0];
+  if (!apiPathApp) {
+    fail("Could not load the existing /api Access app.");
+  }
 
   if (!isLegacyApiBypassApp(apiPathApp, hostname, configName, existingPolicies)) {
     fail(
@@ -763,9 +870,9 @@ async function migrateLegacyApiAccessApp(
   try {
     await cfApi(cfToken, "DELETE", `/accounts/${accountId}/access/apps/${apiPathApp.id}`);
     s.stop("Removed legacy API-only Access app");
-  } catch (e: any) {
+  } catch (error: unknown) {
     s.stop();
-    fail(`Failed to remove legacy API-only Access app: ${e.message}`);
+    fail(`Failed to remove legacy API-only Access app: ${getErrorMessage(error)}`);
   }
 }
 
@@ -784,9 +891,9 @@ async function ensureCloudflaredForCli(): Promise<void> {
       await run("brew", ["install", "cloudflared"]);
       s.stop("cloudflared installed");
       return;
-    } catch (e: any) {
+    } catch (error: unknown) {
       s.stop();
-      console.log(`  ${dim(`cloudflared install failed: ${e.message}`)}`);
+      console.log(`  ${dim(`cloudflared install failed: ${getErrorMessage(error)}`)}`);
     }
   }
 
@@ -830,8 +937,8 @@ async function main() {
   let whoamiOutput = "";
   try {
     whoamiOutput = await run("npx", ["wrangler", "whoami"]);
-  } catch (e: any) {
-    whoamiOutput = formatCommandError(e);
+  } catch (error: unknown) {
+    whoamiOutput = formatCommandError(error);
   }
   const accountMatch = whoamiOutput.match(/[│|]\s+(.+?)\s+[│|]\s+([a-f0-9]{32})\s+[│|]/);
   if (accountMatch) wranglerAccount = { name: accountMatch[1], id: accountMatch[2] };
@@ -886,16 +993,21 @@ async function main() {
     try {
       await cfApi(cfToken, "GET", "/user/tokens/verify");
       s.stop("Token verified");
-    } catch (e: any) {
+    } catch (error: unknown) {
       s.stop();
-      fail(`Invalid token: ${e.message}`);
+      fail(`Invalid token: ${getErrorMessage(error)}`);
     }
 
     // Resolve the workers.dev hostname so we can configure the Access app
     s = spinner("Resolving workers.dev hostname...", true);
     let hostname: string;
     try {
-      const subdomainResult = await cfApi(cfToken, "GET", `/accounts/${accountId}/workers/subdomain`);
+      const subdomainResult = parseWorkersSubdomain(
+        await cfApi(cfToken, "GET", `/accounts/${accountId}/workers/subdomain`),
+      );
+      if (!subdomainResult) {
+        throw new Error("invalid workers subdomain response");
+      }
       hostname = `sharehtml.${subdomainResult.subdomain}.workers.dev`;
       s.stop(`Hostname: ${hostname}`);
     } catch {
@@ -954,16 +1066,21 @@ async function main() {
           existingPolicies,
         );
 
-        const org = await cfApi(cfToken, "GET", `/accounts/${accountId}/access/organizations`);
+        const org = parseAccessOrganization(
+          await cfApi(cfToken, "GET", `/accounts/${accountId}/access/organizations`),
+        );
+        if (!org) {
+          fail("Could not parse Access organization response.");
+        }
         accessTeam = org.auth_domain.replace(".cloudflareaccess.com", "");
         accessAud = browserApp.aud ?? "";
         if (!accessAud) {
           fail("Access app was created but has no audience tag (aud). Check the Cloudflare dashboard.");
         }
         break;
-      } catch (e: any) {
+      } catch (error: unknown) {
         s.stop();
-        const message = e?.message || String(e);
+        const message = getErrorMessage(error);
         if (isAccessNotEnabledError(message)) {
           const shouldRetry = await retryAccessSetup(accountId);
           if (shouldRetry) continue;
@@ -987,9 +1104,9 @@ async function main() {
   try {
     writeWranglerProductionVars(configPath, productionVars);
     s.stop("Production vars updated");
-  } catch (e: any) {
+  } catch (error: unknown) {
     s.stop();
-    fail(`Failed to update wrangler.jsonc: ${e.message}`);
+    fail(`Failed to update wrangler.jsonc: ${getErrorMessage(error)}`);
   }
 
   if (useAccess) {
@@ -1001,9 +1118,9 @@ async function main() {
           ? "Browser capability secret created"
           : "Browser capability secret already configured",
       );
-    } catch (e: any) {
+    } catch (error: unknown) {
       s.stop();
-      fail(`Failed to configure VIEWER_CAPABILITY_SECRET: ${formatCommandError(e)}`);
+      fail(`Failed to configure VIEWER_CAPABILITY_SECRET: ${formatCommandError(error)}`);
     }
   }
 
@@ -1018,9 +1135,9 @@ async function main() {
     }
     workerUrl = urlMatch[0];
     s.stop(`Deployed ${cyan(workerUrl)}`);
-  } catch (e: any) {
+  } catch (error: unknown) {
     s.stop();
-    const message = formatCommandError(e);
+    const message = formatCommandError(error);
     if (isMissingR2Error(message)) {
       fail(getR2SetupMessage());
     }
@@ -1081,6 +1198,6 @@ async function main() {
   console.log();
 }
 
-main().catch((e) => {
-  fail(e.message);
+main().catch((error: unknown) => {
+  fail(getErrorMessage(error));
 });

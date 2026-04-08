@@ -7,6 +7,7 @@ import { viewer } from "./routes/viewer.js";
 import { HomeView } from "./frontend/home.js";
 import { createCapabilityToken } from "./utils/capability.js";
 import { getAssetUrls } from "./utils/assets.js";
+import { normalizeEmail } from "./utils/email.js";
 import { getRegistry } from "./utils/registry.js";
 
 export { DocumentDO } from "./durable-objects/document.js";
@@ -38,7 +39,7 @@ app.route("/api", api);
 app.route("/", viewer);
 
 app.get("/", async (c) => {
-  const { email } = c.get("authUser");
+  const email = normalizeEmail(c.get("authUser").email);
   const url = new URL(c.req.url);
   const query = (url.searchParams.get("q") || "").trim();
   const requestedPage = Number.parseInt(url.searchParams.get("page") || "1", 10);

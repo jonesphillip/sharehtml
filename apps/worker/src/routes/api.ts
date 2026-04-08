@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { isRecord, isShareMode, isSourceKind, parseDocumentSnapshot, shareModeFromInt, shareModeToInt, type AppBindings, type DocumentSnapshot, type ShareMode, type SourceKind } from "../types.js";
 import { nanoid } from "../utils/ids.js";
+import { loadDocWithAccessCheck } from "../utils/document-access.js";
 import { getRegistry } from "../utils/registry.js";
 import { extractDocumentTextFromHtml } from "../utils/document-text.js";
 import {
@@ -11,6 +12,7 @@ import {
   getSourceObject,
 } from "../utils/document-storage.js";
 import { createAttachmentHeaders } from "../utils/download.js";
+import { emailsMatch, normalizeEmail } from "../utils/email.js";
 import { requireHomeBrowserCapability, requireViewerBrowserCapability } from "../utils/request-security.js";
 
 const api = new Hono<AppBindings>();
@@ -74,6 +76,50 @@ function parseSourceFields(formData: FormData): {
   return { source, sourceKind, sourceLanguage };
 }
 
+type ShareRequest =
+  | { mode: ShareMode; emails?: string[] }
+  | { mode: "link" | "private" };
+
+function parseShareRequestBody(body: unknown): { value: ShareRequest | null; error: string | null } {
+  if (!isRecord(body)) {
+    return { value: null, error: "invalid request body" };
+  }
+
+  if (isShareMode(body.mode)) {
+    if (body.mode !== "emails") {
+      return { value: { mode: body.mode }, error: null };
+    }
+
+    if (body.emails === undefined) {
+      return { value: { mode: "emails", emails: [] }, error: null };
+    }
+
+    if (!Array.isArray(body.emails)) {
+      return { value: null, error: "emails must be an array" };
+    }
+
+    if (body.emails.length > 100) {
+      return { value: null, error: "maximum 100 emails" };
+    }
+
+    const emails: string[] = [];
+    for (const entry of body.emails) {
+      if (typeof entry !== "string" || !entry.includes("@")) {
+        return { value: null, error: "each email must be a valid email address" };
+      }
+      emails.push(entry);
+    }
+
+    return { value: { mode: "emails", emails }, error: null };
+  }
+
+  if (typeof body.isShared === "boolean") {
+    return { value: { mode: body.isShared ? "link" : "private" }, error: null };
+  }
+
+  return { value: null, error: "must provide mode or isShared" };
+}
+
 async function migrateDocumentAnchors(
   documentDo: DurableObjectStub,
   newHtml: string,
@@ -122,7 +168,7 @@ api.post("/documents", async (c) => {
   const protectedResponse = await requireHomeBrowserCapability(c);
   if (protectedResponse) return protectedResponse;
 
-  const ownerEmail = c.get("authUser").email;
+  const ownerEmail = normalizeEmail(c.get("authUser").email);
   const formData = await c.req.formData();
   const rawFile = formData.get("file");
   const file = rawFile instanceof File ? rawFile : null;
@@ -151,7 +197,7 @@ api.post("/documents", async (c) => {
       title: resolvedTitle,
       filename: sourceFilename,
       size: file.size,
-      owner_email: ownerEmail,
+      owner_email: normalizeEmail(ownerEmail),
       is_shared: c.env.AUTH_MODE === "access" ? 0 : 1,
       rendered_filename: renderedFilename,
       source_filename: source && sourceKind ? sourceFilename : null,
@@ -254,7 +300,7 @@ api.get("/documents/:id/raw", async (c) => {
   if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
-  if (!doc || doc.owner_email !== c.get("authUser").email) {
+  if (!doc || !emailsMatch(doc.owner_email, c.get("authUser").email)) {
     return c.json({ error: "not found" }, 404);
   }
 
@@ -285,7 +331,7 @@ api.get("/documents/:id/source", async (c) => {
   if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
-  if (!doc || doc.owner_email !== c.get("authUser").email) {
+  if (!doc || !emailsMatch(doc.owner_email, c.get("authUser").email)) {
     return c.json({ error: "not found" }, 404);
   }
 
@@ -309,7 +355,7 @@ api.get("/documents/:id/rendered", async (c) => {
   if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
-  if (!doc || doc.owner_email !== c.get("authUser").email) {
+  if (!doc || !emailsMatch(doc.owner_email, c.get("authUser").email)) {
     return c.json({ error: "not found" }, 404);
   }
 
@@ -333,7 +379,7 @@ api.get("/documents/:id", async (c) => {
   if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
-  if (!doc || doc.owner_email !== c.get("authUser").email) {
+  if (!doc || !emailsMatch(doc.owner_email, c.get("authUser").email)) {
     return c.json({ error: "not found" }, 404);
   }
   return c.json({ document: doc });
@@ -365,7 +411,7 @@ api.put("/documents/:id", async (c) => {
     return c.json({ error: "not found" }, 404);
   }
 
-  if (meta.owner_email !== c.get("authUser").email) {
+  if (!emailsMatch(meta.owner_email, c.get("authUser").email)) {
     return c.json({ error: "forbidden" }, 403);
   }
 
@@ -485,7 +531,7 @@ api.get("/documents/:id/share", async (c) => {
   if (protectedResponse) return protectedResponse;
   const registry = getRegistry(c.env);
   const doc = await registry.getDocument(id);
-  if (!doc || doc.owner_email !== c.get("authUser").email) {
+  if (!doc || !emailsMatch(doc.owner_email, c.get("authUser").email)) {
     return c.json({ error: "not found" }, 404);
   }
   const mode = shareModeFromInt(doc.is_shared);
@@ -502,34 +548,12 @@ api.put("/documents/:id/share", async (c) => {
     return c.json({ error: "Cloudflare Access is required for document sharing controls" }, 400);
   }
 
-  const body: unknown = await c.req.json();
-  if (!isRecord(body)) {
-    return c.json({ error: "invalid request body" }, 400);
+  const parsedBody = parseShareRequestBody(await c.req.json());
+  if (!parsedBody.value) {
+    return c.json({ error: parsedBody.error || "invalid request body" }, 400);
   }
-
-  let mode: ShareMode;
-  let emails: string[] | undefined;
-
-  if (isShareMode(body.mode)) {
-    mode = body.mode;
-    if (mode === "emails") {
-      if (Array.isArray(body.emails)) {
-        if (body.emails.length > 100) {
-          return c.json({ error: "maximum 100 emails" }, 400);
-        }
-        if (!body.emails.every((e: unknown) => typeof e === "string" && e.includes("@"))) {
-          return c.json({ error: "each email must be a valid email address" }, 400);
-        }
-        emails = body.emails;
-      } else {
-        emails = [];
-      }
-    }
-  } else if (typeof body.isShared === "boolean") {
-    mode = body.isShared ? "link" : "private";
-  } else {
-    return c.json({ error: "must provide mode or isShared" }, 400);
-  }
+  const { mode } = parsedBody.value;
+  const emails = "emails" in parsedBody.value ? parsedBody.value.emails : undefined;
 
   const registry = getRegistry(c.env);
   const meta = await registry.getDocument(id);
@@ -538,11 +562,11 @@ api.put("/documents/:id/share", async (c) => {
     return c.json({ error: "not found" }, 404);
   }
 
-  if (meta.owner_email !== c.get("authUser").email) {
+  if (!emailsMatch(meta.owner_email, c.get("authUser").email)) {
     return c.json({ error: "forbidden" }, 403);
   }
 
-  const ownerEmail = meta.owner_email.toLowerCase();
+  const ownerEmail = normalizeEmail(meta.owner_email);
   await registry.setDocumentShareMode(id, shareModeToInt(mode));
   if (emails) {
     await registry.setSharedEmails(id, emails.filter((e) => e.toLowerCase() !== ownerEmail));
@@ -565,7 +589,7 @@ api.delete("/documents/:id", async (c) => {
     return c.json({ error: "not found" }, 404);
   }
 
-  if (meta.owner_email !== c.get("authUser").email) {
+  if (!emailsMatch(meta.owner_email, c.get("authUser").email)) {
     return c.json({ error: "forbidden" }, 403);
   }
 
@@ -593,21 +617,11 @@ api.get("/documents/:id/comments", async (c) => {
   const id = c.req.param("id");
   const protectedResponse = await requireViewerBrowserCapability(c, id, { requireOrigin: false });
   if (protectedResponse) return protectedResponse;
-  const email = c.get("authUser").email;
-  const registry = getRegistry(c.env);
-  const doc = await registry.getDocument(id);
-  if (!doc) {
+  const result = await loadDocWithAccessCheck(c.env, id, c.get("authUser").email);
+  if (!result) {
     return c.json({ error: "not found" }, 404);
   }
-
-  // Shared users can view comments, not just the owner
-  const isOwner = doc.owner_email === email;
-  const isLinkShared = doc.is_shared === 1;
-  const isEmailShared = doc.is_shared === 2 &&
-    (await registry.getSharedEmails(id)).includes(email.toLowerCase());
-  if (!isOwner && !isLinkShared && !isEmailShared) {
-    return c.json({ error: "not found" }, 404);
-  }
+  const { doc } = result;
 
   const documentDoId = c.env.DOCUMENT_DO.idFromName(id);
   const documentDo = c.env.DOCUMENT_DO.get(documentDoId);
