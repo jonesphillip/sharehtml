@@ -7,6 +7,7 @@ import {
   WEBSOCKET_CAPABILITY_PROTOCOL_PREFIX,
   WEBSOCKET_SUBPROTOCOL,
 } from "../utils/security-constants.js";
+import { pixelPositionsEqual } from "./pixel-positions.js";
 
 type AuthMode = "access" | "none";
 type ShareMode = "private" | "link" | "emails";
@@ -1536,7 +1537,10 @@ function handleIframeMessage(e: MessageEvent) {
             shouldRender = true;
           }
         }
-      } else {
+      } else if (!pixelPositionsEqual(highlightPixelPositions, nextPixelPositions)) {
+        // Re-measures fire on any document mutation; only repaint when an
+        // anchor actually moved, otherwise an animated document (e.g. a live
+        // clock) flashes the comments on every tick.
         highlightPixelPositions = nextPixelPositions;
         shouldRender = true;
       }
