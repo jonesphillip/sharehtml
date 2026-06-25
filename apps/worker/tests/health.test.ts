@@ -14,4 +14,10 @@ describe("GET /health", () => {
     });
     expect(response.status).toBe(200);
   });
+
+  it("denies framing on every response", async () => {
+    const response = await exports.default.fetch("https://example.com/health");
+    expect(response.headers.get("Content-Security-Policy")).toBe("frame-ancestors 'none'");
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+  });
 });
