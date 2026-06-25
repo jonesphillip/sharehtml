@@ -5,6 +5,7 @@ import { getAssetUrls } from "../utils/assets.js";
 import { createCapabilityToken } from "../utils/capability.js";
 import { loadDocWithAccessCheck } from "../utils/document-access.js";
 import { createAttachmentHeaders } from "../utils/download.js";
+import { docCspFromEnv, injectDocCsp } from "../utils/doc-csp.js";
 import { emailsMatch, normalizeEmail } from "../utils/email.js";
 import { requireViewerBrowserCapability } from "../utils/request-security.js";
 import { getRenderedObject } from "../utils/document-storage.js";
@@ -88,12 +89,19 @@ viewer.get("/d/:id/content", async (c) => {
   }
 
   const renderedFilename = doc.rendered_filename || doc.filename;
-
-  return new Response(obj.body, {
-    headers: createAttachmentHeaders(renderedFilename, {
-      "X-ShareHTML-Download-Content-Type": "text/html; charset=utf-8",
-    }),
+  const headers = createAttachmentHeaders(renderedFilename, {
+    "X-ShareHTML-Download-Content-Type": "text/html; charset=utf-8",
   });
+
+  // DOC_CSP_ALLOWED_ORIGINS is an optional opt-in var, absent from the generated
+  // Env types. When set, lock the document's egress to the allowlist.
+  const allowlist = (c.env as Record<string, string | undefined>).DOC_CSP_ALLOWED_ORIGINS;
+  const csp = docCspFromEnv(allowlist);
+  if (csp) {
+    return new Response(injectDocCsp(await obj.text(), csp), { headers });
+  }
+
+  return new Response(obj.body, { headers });
 });
 
 // WebSocket proxy to Document DO
