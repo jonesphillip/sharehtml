@@ -31,6 +31,16 @@ app.onError((err, c) => {
   return c.json({ error: "Internal Server Error" }, 500);
 });
 
+// Deny framing of every first-party page. The shell carries sharing controls,
+// so an attacker embedding it could clickjack them. Safe as a blanket header:
+// the only iframe we render is the document via `srcdoc`, which is not a URL
+// fetch and so is unaffected by frame-ancestors.
+app.use("/*", async (c, next) => {
+  await next();
+  c.header("Content-Security-Policy", "frame-ancestors 'none'");
+  c.header("X-Frame-Options", "DENY");
+});
+
 app.get("/health", (c) => c.json({ status: "ok" }));
 
 app.use("/*", authMiddleware);
